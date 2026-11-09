@@ -16,7 +16,9 @@ computer and transfer metadata to fetch text inside ClipSend.
 Computer aliases and pairings can be renamed or forgotten in Settings. Notification
 permission is requested only after an explicit user action. Camera and local network
 access have purpose-specific system descriptions. HTTPS redirects are rejected;
-there are no ATS exceptions. Device tokens use the actual installed bundle ID and
+ATS exceptions are limited to private IPv4 ranges for pinned local HTTPS.
+Global arbitrary loads are disabled, and each connection must match the paired
+certificate. Device tokens use the actual installed bundle ID and
 the configured APNs environment.
 
 ## Build and portable checks
@@ -36,6 +38,22 @@ fractional RFC3339 timestamps, private HTTPS endpoint validation, invitation
 expiry, transfer size/identity/expiry, and deduplication keys, plus the existing
 build-configuration self-check.
 
-Physical camera, Bonjour permission, APNs delivery, onboarding, VoiceOver, Dynamic
-Type, and iPhone/iPad layout behavior still need device confirmation. Compilation
-and portable checks do not establish those device outcomes.
+## Install on a device
+
+A signed developer installation requires an Apple developer account, configured
+xtool signing access, and an app identifier with Push Notifications enabled. With
+the intended device connected over USB, unlocked, and trusted, run from this directory:
+
+```sh
+xtool dev run --usb
+```
+
+Open ClipSend manually after installation and follow setup. Configure desktop
+notifications using the [root README](../../README.md#notifications), then pair.
+Signing credentials and APNs keys stay outside the repository. There is currently
+no App Store or TestFlight installation offered by this project.
+
+Camera pairing, first-run setup, direct receipt, Copy, notification opening and
+lock-screen delivery have been tested on physical iPhone and iPad devices.
+Broader permission-recovery, VoiceOver, Dynamic Type, and layout coverage remain
+release gates; compilation and portable checks do not establish those outcomes.

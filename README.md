@@ -5,8 +5,8 @@ notification, read the text in ClipSend, and Copy. No LocalSend or Shortcuts,
 automatic clipboard monitoring, exported text files, or permanent message history.
 
 **Native receiver.** Direct delivery, notification opening, and Copy have been
-tested on physical iPhone and iPad devices. Public distribution and hosted customer
-enrollment are not yet available; see [release readiness](docs/RELEASE.md).
+tested on physical iPhone and iPad devices. The iOS app currently requires a signed developer installation;
+public distribution and hosted customer enrollment are not yet available; see [release readiness](docs/RELEASE.md).
 
 ## Daily use
 
@@ -17,18 +17,20 @@ printf 'A link or some text' | clipsend send ipad --stdin
 ```
 
 The computer and device must be on the same local IPv4 network. Keep the computer
-awake and the command running until the device confirms receipt. Text is held only
+awake and the command running until the device confirms receipt. Only UTF-8 text is supported, up to 64,000 bytes per send. Text is held only
 in process memory and each send expires after two minutes. The command reports
 **Received** after the app acknowledges holding the text; it does not claim that you
 have copied or pasted it. Cancellation or expiry means receipt was not confirmed.
 
-When the app is already open it can discover the send directly. Otherwise a generic
-notification opens ClipSend to retrieve it. Notification service failure does not
+When the app is already open it can discover the send directly. Otherwise, tapping a generic
+notification opens ClipSend to retrieve it. Each send and notification targets only
+the named paired device. Notification service failure does not
 prevent opening the app manually while the send is pending.
 
 ## Install and pair
 
-The desktop build needs Go 1.26+ and Linux. Clipboard reading uses `wl-clipboard`
+The desktop build needs Go 1.26+ and Linux. Run the build commands from a clone
+of this repository and ensure `~/.local/bin` is on your `PATH`. Clipboard reading uses `wl-clipboard`
 in a Wayland session; `--stdin` works independently of the clipboard.
 
 ```sh
@@ -45,10 +47,11 @@ has an Open Settings action; setup checks again when you return. You can explici
 continue without alerts and receive with the app open.
 
 Scan the terminal QR code, then approve the named device on the computer. The CLI
-offers an optional test notification after pairing: put the device on its Home
-Screen before accepting the test. Pairing expires in five minutes. A camera-denied flow can use manual
-pairing content printed with `clipsend pair iphone --code`. `--qr /path/to/pair.png` additionally creates a private
-QR image for scanning; the command removes that image when pairing ends.
+offers an optional test notification after pairing (requires notification configuration
+below): put the device on its Home
+Screen before accepting the test. Pairing expires in five minutes. If camera access is unavailable,
+`clipsend pair iphone --code` prints pairing content for the app’s Paste pairing code
+action. `--qr /path/to/pair.png` additionally creates a private QR image for scanning; the command removes that image when pairing ends.
 
 ```sh
 clipsend devices
@@ -57,7 +60,9 @@ clipsend unpair mobile
 clipsend doctor
 ```
 
-Aliases are exact, case-insensitive names. Unpairing deletes the device credential
+Choose a unique name when pairing each device, such as `iphone`, `ipad`, or
+`family-phone`. These are stored pairing names, not built-in device types or shell
+aliases. Aliases are exact, case-insensitive names. Unpairing deletes the device credential
 and revokes its access to the computer. Forgetting a computer in the mobile app
 removes its locally saved pairing. If you lose a device, unpair it on each computer.
 
@@ -71,18 +76,27 @@ Pairing and sends listen on TCP port **53318**, bound to the chosen LAN address.
 Allow that port from your trusted local subnet through the computer's firewall.
 Only one pairing or send can use that address/port at a time; finish or cancel it
 before starting another. `--port PORT` selects an explicitly allowed alternative.
-The CLI never changes firewall rules itself.
+The CLI never changes firewall rules itself. It listens only while pairing or
+sending; no router port forwarding is needed. Push notifications use outbound
+HTTPS to Apple or your configured relay.
 
 ## Notifications
 
-With a hosted notification service, the desktop client does not need an Apple developer account or APNs private key.
+Notifications are optional: foreground delivery works without them. Configure
+either direct APNs access for a personal Apple developer installation or an
+operator-provided hosted relay. Neither route sends clipboard text through Apple.
+
+### Hosted relay
+
+With a hosted notification service, the desktop client does not need an Apple
+developer account or APNs private key.
 A separately operated [notification service](internal/relay/README.md) holds those
 credentials and accepts scoped installation credentials. The service sends fixed
 alert text and opaque computer/transfer IDs plus local connection endpoints. It
 never receives clipboard text or device-pairing secrets.
 
 Public hosting and automatic customer enrollment are not deployed. For a private
-installation, the operator provisions a scoped credential and supplies a mode0600
+installation, the operator provisions a scoped credential and supplies a mode `0600`
 file containing:
 
 ```json

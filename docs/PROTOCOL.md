@@ -11,7 +11,7 @@ pair invitation TTL 300 seconds. Tokens/secrets never enter logs.
 Computer persists a self-signed TLS certificate/private key and random computerID.
 Phone pins SHA256 of the DER leaf certificate, independent of endpoint hostname.
 Phone credentials in Keychain; desktop credentials in private atomic 0600 files in
-a new `clipsend-native` config directory (never touch legacy clipsend config).
+a new `clipsend-native` config directory (separate from the retired bridge config).
 
 QR encodes this JSON as UTF-8 (not a URL):
 `{"version":1,"computerID":"random-id","computerName":"Desktop","endpoint":"https://192.168.1.2:12345","certificateSHA256":"64-lowercase-hex","invitation":"random-32-byte-base64url","expiresAt":"RFC3339"}`.
@@ -27,8 +27,9 @@ without cert pinning. TLS minimum1.2. Never globally disable TLS validation.
 
 ## Delivery
 
-Each CLI send serves HTTPS on a random port until acknowledgment, cancellation,
-or expiry. Multiple sends may run concurrently, with distinct transfer IDs/ports.
+Each CLI send serves HTTPS on LAN TCP port 53318 by default until acknowledgment,
+cancellation, or expiry. Only one operation can use the same address/port at a time.
+Explicit `--port` overrides permit separate listeners where the firewall allows them.
 Text stays in memory. Every route below requires `Authorization: Bearer SECRET`
 for that specific paired recipient. Wrong/unknown tokens get 401 without details.
 
@@ -69,10 +70,8 @@ rate limits per credential, and fixed alert copy. 202 means Apple accepted; neve
 means receiver got text. Desktop stores relayURL+relayToken outside repo. No direct
 APNs credentials distributed to customer clients. Tests use local injected mock APNs.
 
-## Ownership
 
-Protocol worker: internal/direct/** (server+private store+meaningful tests).
-Native worker: native/ios/** (replace companion, scan/pair/discover/receive/copy UI).
-Service worker: internal/relay/** and cmd/clipsend-relay/** (service+client+tests).
-Primary: root CLI, dependencies, docs, packaging, integration and review.
-Workers may not commit/push, install on devices, edit other owned files, or publish.
+For personal operator installations, the CLI can load a private operator config
+and send directly to APNs without running the HTTP service. This uses the same
+request validation and scoped credentials; hosted HTTP rate limits do not apply
+to these trusted local operations. See the root README for configuration.
