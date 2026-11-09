@@ -22,22 +22,35 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         CompanionModel.shared.registrationFailed()
     }
 
+    // UIKit's notification completion can update snapshots/state restoration.
+    // Keep the completion on MainActor explicitly rather than using the async
+    // delegate bridge, which may invoke it on a cooperative worker thread.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification
-    ) async -> UNNotificationPresentationOptions {
-        // Receipt only presents the alert. It never routes to another app.
-        [.banner, .list, .sound]
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping @Sendable (UNNotificationPresentationOptions) -> Void
+    ) {
+        let metadata = PushMetadata.parse(notification.request.content.userInfo)
+        Task { @MainActor in
+            if let metadata { CompanionModel.shared.notificationReceived(metadata) }
+            completionHandler([])
+        }
     }
 
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse
-    ) async {
-        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
-              response.notification.request.trigger is UNPushNotificationTrigger else { return }
-        await CompanionModel.shared.notificationTapped()
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping @Sendable () -> Void
+    ) {
+        let shouldReceive = response.actionIdentifier == UNNotificationDefaultActionIdentifier &&
+            response.notification.request.trigger is UNPushNotificationTrigger
+        let metadata = shouldReceive ? PushMetadata.parse(response.notification.request.content.userInfo) : nil
+        Task { @MainActor in
+            if let metadata { CompanionModel.shared.notificationReceived(metadata) }
+            completionHandler()
+        }
     }
+
 }
 
 @main

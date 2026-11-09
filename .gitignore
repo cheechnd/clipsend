@@ -1,4 +1,6 @@
 /clipsend
+/dist/
+/clipsend-relay
 *.pem
 *.key
 .env

@@ -16,6 +16,14 @@ func plist(_ data: Data) throws -> [String: Any] {
     return dictionary
 }
 
+let privateRanges = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]
+let localATS: [String: Any] = [
+    "NSAllowsLocalNetworking": true,
+    "NSExceptionDomains": Dictionary(uniqueKeysWithValues: privateRanges.map {
+        ($0, ["NSExceptionAllowsInsecureHTTPLoads": true, "NSExceptionMinimumTLSVersion": "TLSv1.2"] as [String: Any])
+    }),
+]
+
 func configuration(_ info: [String: Any], requested: [String: Any], bundleID: String = "dev.cheechnd.clipsend") throws -> String {
     try require(info["CFBundleIdentifier"] as? String == bundleID, "Built app does not match the exact expected bundle ID.")
     try require(info["CFBundleDisplayName"] as? String == "ClipSend", "Built app has the wrong display name.")
@@ -25,7 +33,9 @@ func configuration(_ info: [String: Any], requested: [String: Any], bundleID: St
     }
     try require(requested["aps-environment"] as? String == expected, "Info.plist environment and requested aps-environment differ.")
     try require(Set(info["UIDeviceFamily"] as? [Int] ?? []) == [1, 2], "iPhone/iPad support is missing.")
-    try require(info["NSAppTransportSecurity"] == nil, "Unexpected ATS configuration.")
+    let ats = info["NSAppTransportSecurity"] as? [String: Any]
+    try require(NSDictionary(dictionary: ats ?? [:]).isEqual(to: localATS),
+                "Require only private-IP ATS exceptions with TLS 1.2; global arbitrary loads must remain disabled.")
     return expected
 }
 
@@ -65,8 +75,14 @@ func selfCheck() throws {
     var info: [String: Any] = [
         "CFBundleIdentifier": "dev.cheechnd.clipsend", "CFBundleDisplayName": "ClipSend",
         "ClipSendAPNSEnvironment": "sandbox", "UIDeviceFamily": [1, 2],
+        "NSAppTransportSecurity": localATS,
     ]
     let development = try configuration(info, requested: ["aps-environment": "development"])
+    for invalidATS: [String: Any] in [[:], ["NSAllowsArbitraryLoads": true], ["NSAllowsLocalNetworking": true, "NSAllowsArbitraryLoads": true]] {
+        var invalidInfo = info
+        invalidInfo["NSAppTransportSecurity"] = invalidATS
+        try expectFailure { _ = try configuration(invalidInfo, requested: ["aps-environment": "development"]) }
+    }
     try require(development == "development", "Development check failed.")
     info["ClipSendAPNSEnvironment"] = "production"
     let production = try configuration(info, requested: ["aps-environment": "production"])

@@ -1,140 +1,150 @@
 # ClipSend
 
-Send your clipboard to your iPhone or iPad as a LocalSend message with a Copy
-button. No text files, desktop notifications, or background service. An optional
-iPhone/iPad companion can notify you when LocalSend needs opening.
+Send clipboard text from Linux directly to your paired iPhone or iPad. Tap the
+notification, read the text in ClipSend, and Copy. No LocalSend or Shortcuts,
+automatic clipboard monitoring, exported text files, or permanent message history.
+
+**Native receiver.** Direct delivery, notification opening, and Copy have been
+tested on physical iPhone and iPad devices. Public distribution and hosted customer
+enrollment are not yet available; see [release readiness](docs/RELEASE.md).
+
+## Daily use
 
 ```sh
 clipsend iphone
 clipsend ipad
-clipsend          # choose a device in the terminal; Enter cancels
-clipsend --list
+printf 'A link or some text' | clipsend send ipad --stdin
 ```
 
-Without the companion, open LocalSend on the receiving device on the same LAN.
-After sending, tap Copy
-in LocalSend and paste where you need it. This is an explicit text transfer,
-not automatic clipboard synchronization. Images are not supported.
+The computer and device must be on the same local IPv4 network. Keep the computer
+awake and the command running until the device confirms receipt. Text is held only
+in process memory and each send expires after two minutes. The command reports
+**Received** after the app acknowledges holding the text; it does not claim that you
+have copied or pasted it. Cancellation or expiry means receipt was not confirmed.
 
-## Install
+When the app is already open it can discover the send directly. Otherwise a generic
+notification opens ClipSend to retrieve it. Notification service failure does not
+prevent opening the app manually while the send is pending.
 
-Requires Go 1.25+ to build and `wl-clipboard` to read the Wayland clipboard.
-The binary implements the LocalSend protocol itself using Go's standard library;
-Python, openssl, and the desktop LocalSend CLI are not required.
+## Install and pair
+
+The desktop build needs Go 1.26+ and Linux. Clipboard reading uses `wl-clipboard`
+in a Wayland session; `--stdin` works independently of the clipboard.
 
 ```sh
-CGO_ENABLED=0 go build -trimpath -o clipsend .
+go build -trimpath -o clipsend .
 mkdir -p ~/.local/bin
 ln -s "$PWD/clipsend" ~/.local/bin/clipsend
+clipsend pair iphone
 ```
 
-Rebuild with the same `go build` command after source changes; the symlink
-always points to the current build. Keep this checkout in place while installed.
+Install the [native iOS app](native/ios/README.md) and choose **Set up ClipSend**.
+Setup requests notification permission, checks local-network discovery, then offers
+the pairing scanner. Camera permission is requested when you scan. Denied access
+has an Open Settings action; setup checks again when you return. You can explicitly
+continue without alerts and receive with the app open.
 
-There are no changes to Omarchy, Hyprland, keybindings, or menus.
-Remove `~/.local/bin/clipsend` to uninstall the command.
-
-## Device names
-
-Use a device's full LocalSend name or an unambiguous part of it. For short names,
-create `~/.config/clipsend/aliases.json`:
-
-```json
-{
-  "iphone": "Your phone's LocalSend name",
-  "ipad": "Your iPad's LocalSend name"
-}
-```
-
-Aliases follow device names instead of DHCP addresses. `--list` shows current
-names and addresses; addresses from that list are also accepted as destinations.
-`XDG_CONFIG_HOME` is respected. The same directory holds the local TLS identity;
-keep its private key private. No clipboard contents or transfer history are saved.
-
-## Optional iPhone/iPad companion
-
-The native companion lives in [`native/ios`](native/ios/README.md). It needs an
-Apple developer account, a signed app installed on the device, notification
-permission, and an **Open LocalSend** shortcut whose action opens LocalSend.
-It sends no clipboard contents through Apple.
-
-On the computer, store your APNs credentials in
-`~/.config/clipsend/push.json` (permissions `0600`):
-
-```json
-{
-  "keyID": "KEYID12345",
-  "teamID": "YOURTEAM12",
-  "keyPath": "/absolute/path/to/AuthKey_KEYID12345.p8"
-}
-```
-
-Use the actual ten-character IDs from your developer account. `keyPath` must be
-an absolute path to the APNs key, stored outside this repository with permissions
-`0600`. An App Store Connect API key is a different credential.
-
-In the companion, share its pairing details to the computer. Copy that JSON into
-the computer's clipboard, then pair it with the same alias you use for LocalSend:
+Scan the terminal QR code, then approve the named device on the computer. The CLI
+offers an optional test notification after pairing: put the device on its Home
+Screen before accepting the test. Pairing expires in five minutes. A camera-denied flow can use manual
+pairing content printed with `clipsend pair iphone --code`. `--qr /path/to/pair.png` additionally creates a private
+QR image for scanning; the command removes that image when pairing ends.
 
 ```sh
-clipsend pair iphone                # reads pairing JSON from the clipboard
-clipsend pair ipad /path/to/pairing.json
-clipsend notify iphone              # explicit notification-only test
-clipsend unpair iphone              # deletes this notification pairing
+clipsend devices
+clipsend rename iphone mobile
+clipsend unpair mobile
+clipsend doctor
 ```
 
-Pairing stores only notification routing. Keep `aliases.json` pointing at the
-intended device's LocalSend name. Pairing again replaces that alias's notification
-token; do this after reinstalling the companion or if Apple invalidates its token.
-The companion exports the current token when opened.
+Aliases are exact, case-insensitive names. Unpairing deletes the device credential
+and revokes its access to the computer. Forgetting a computer in the mobile app
+removes its locally saved pairing. If you lose a device, unpair it on each computer.
 
-With notifications configured, `clipsend iphone` still sends immediately when
-LocalSend is available. Otherwise it sends one generic alert and waits up to
-90 seconds for that device. Tap the alert, unlock if needed, and let the shortcut
-open LocalSend. The captured clipboard stays in process memory; Ctrl+C or a
-wait timeout discards it. A transfer whose result is uncertain is never retried.
-No destination is guessed and no notification is sent for an ambiguous name.
+If several supported local networks are active, run `clipsend doctor` and pass
+`--host <local-IP>` to pairing or sending. This avoids guessing which network your
+phone is on. Multicast/Bonjour must be permitted for foreground discovery; wake
+notifications also carry direct local endpoint information. Guest Wi-Fi client
+isolation can prevent direct delivery.
 
-Apple accepting a notification is not proof it appeared on the phone: permission,
-Focus settings, connectivity, and the app's provisioning can affect delivery.
-The CLI reports success only after LocalSend confirms the text message.
+Pairing and sends listen on TCP port **53318**, bound to the chosen LAN address.
+Allow that port from your trusted local subnet through the computer's firewall.
+Only one pairing or send can use that address/port at a time; finish or cancel it
+before starting another. `--port PORT` selects an explicitly allowed alternative.
+The CLI never changes firewall rules itself.
 
-## Message-only guarantee
+## Notifications
 
-ClipSend includes the complete text as a LocalSend message preview and never
-calls the file-upload endpoint. It refuses empty or invalid UTF-8 text and text
-over 64,000 bytes. A receiver requesting file upload is cancelled. Success means
-the receiver returned HTTP 204, not that you have tapped Copy. A timeout is an
-unconfirmed result; ClipSend does not retry automatically.
+With a hosted notification service, the desktop client does not need an Apple developer account or APNs private key.
+A separately operated [notification service](internal/relay/README.md) holds those
+credentials and accepts scoped installation credentials. The service sends fixed
+alert text and opaque computer/transfer IDs plus local connection endpoints. It
+never receives clipboard text or device-pairing secrets.
 
-HTTPS receivers are pinned to the certificate observed during discovery, checked
-again before the message is sent. This is not persistent device authentication.
+Public hosting and automatic customer enrollment are not deployed. For a private
+installation, the operator provisions a scoped credential and supplies a mode0600
+file containing:
 
-## Verification
+```json
+{"url":"https://notify.example.com","token":"REPLACE_WITH_OPERATOR_ISSUED_INSTALLATION_TOKEN"}
+```
+
+Import it with `clipsend relay /path/to/private-config.json`. For local operator
+work, HTTP is accepted only on a numeric loopback address; remote services require
+verified HTTPS. Installing the client never starts a background daemon.
+
+### Personal Apple developer installation
+
+An operator who owns an APNs key can send notifications directly from the CLI,
+without a running relay process. Keep the service configuration described in
+[the operator guide](internal/relay/README.md) in a private file, then import:
+
+```json
+{"operatorConfig":"/absolute/path/to/operator.json","token":"REPLACE_WITH_SCOPED_CREDENTIAL"}
+```
+
+`operatorConfig` and `url` are mutually exclusive. The operator file and APNs key
+must remain private and outside the repository. The scoped credential must match
+the paired computer and signed app bundle. Direct sends use the same notification
+validation and TLS transport as the service. Service rate limits apply to the
+hosted HTTP endpoint; direct operator sends are trusted local operations.
+
+## Data and trust
+
+Desktop identity, paired-device credentials and notification routing live in
+`$XDG_CONFIG_HOME/clipsend-native` (default `~/.config/clipsend-native`). This is a
+separate store from the prior release. Files are private and written atomically.
+The phone stores paired credentials in Keychain. Text remains in memory; clearing
+it or terminating the app removes the app's in-memory copy. Explicit Copy places
+text on the operating system clipboard, whose own retention is outside ClipSend.
+
+A scanned invitation pins the computer's certificate. Subsequent direct transfers
+require both that TLS pin and the device's bearer credential. Bonjour discovery
+and push metadata never grant trust by themselves. See [protocol](docs/PROTOCOL.md)
+and [security boundaries](docs/SECURITY.md).
+
+## Development and releases
 
 ```sh
-go test -race ./...
+go test -race -timeout 120s ./...
 go vet ./...
+bash native/ios/scripts/check.sh
+bash scripts/build-release.sh v0.1.0
 ```
 
-Tests use local mock receivers, including message-only refusal and certificate
-checks. Actual iPhone/iPad Copy behavior and absence of saved files require a
-manual device check; automated tests do not establish that outcome.
+The release script builds Linux amd64/arm64 executables and checksums in ignored
+`dist/`. Bash completion is in `completions/clipsend.bash`. Native builds use the
+existing Swift/xtool workflow; private signing materials never belong in the repo.
+`bash scripts/build-ios-preview.sh` builds the same native sources under a separate
+**ClipSend Preview** identity so testing does not replace the working installed app.
 
-Discovery scans bounded, directly connected IPv4 LANs (at most 1,024 addresses
-per subnet), excluding common VPN and container interfaces and this computer.
-IPv6-only networks, larger LAN subnets, and multicast-only discovery are not
-currently supported.
+An opt-in integration suite exercises the real LAN listener, CLI, QR decoding,
+mock notification service and pinned receiver. It uses disposable credentials,
+not your clipboard or paired devices. It needs a single eligible LAN and `zbarimg`:
 
-Live check on 2026-11-08: both iPhone and iPad accepted a multiline message
-containing a URL and Unicode. Copy/paste and absence of new `.txt` files were
-confirmed on both devices.
+```sh
+CLIPSEND_NETWORK_TEST=1 go test -race -run TestNative -timeout 40s .
+```
 
-The notification companion builds and installs on iPhone, and its signed APNs
-profile has been checked. A live test with LocalSend in the background delivered
-an alert; tapping it opened LocalSend through the shortcut, and the waiting CLI
-delivered the complete two-line message. The device screenshot confirmed the
-message and Copy button. The companion was also installed and paired on iPad;
-its test notification opened LocalSend without additional prompts.
-The combined iPad test also passed: with LocalSend in the background, tapping
-the alert opened it and the waiting CLI delivered both test lines with Copy.
+[Release readiness](docs/RELEASE.md) distinguishes automated evidence from device
+acceptance, service operation, and App Store distribution.

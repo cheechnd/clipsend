@@ -1,109 +1,107 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"clipsend/internal/direct"
 )
 
-func TestChooseDevice(t *testing.T) {
-	devices := []Device{{Alias: "Phone", IP: "192.0.2.1"}, {Alias: "Phone spare", IP: "192.0.2.2"}}
-	for _, tt := range []struct {
-		name, target, input, want string
-		fail                      bool
-	}{
-		{"exact beats substring", "phone", "", "Phone", false},
-		{"ambiguous", "phon", "", "", true},
-		{"missing", "ipad", "", "", true},
-		{"IP", "192.0.2.2", "", "Phone spare", false},
-		{"picker", "", "2\n", "Phone spare", false},
-		{"cancel", "", "\n", "", true},
-		{"EOF", "", "", "", true},
-		{"bad index", "", "0\n", "", true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			d, err := chooseDevice(context.Background(), devices, tt.target, strings.NewReader(tt.input), io.Discard)
-			if (err != nil) != tt.fail || d.Alias != tt.want {
-				t.Fatalf("got %q, %v", d.Alias, err)
+func TestReadOnlyHelpAndUnpairedList(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	for _, args := range [][]string{{}, {"--help"}, {"--version"}, {"devices"}} {
+		if err := run(context.Background(), args, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Fatal("read-only commands created config")
+	}
+}
+func TestBadTextStopsBeforeConfigCreation(t *testing.T) {
+	for _, value := range []string{"", "\xff", strings.Repeat("x", 64001)} {
+		t.Run(string(rune(len(value)+65)), func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", dir)
+			err := run(context.Background(), []string{"send", "ipad", "--stdin"}, strings.NewReader(value), io.Discard, io.Discard)
+			if err == nil {
+				t.Fatal("accepted invalid text")
+			}
+			entries, _ := os.ReadDir(dir)
+			if len(entries) != 0 {
+				t.Fatal("created config before validation")
 			}
 		})
 	}
 }
-
-func TestClipboardValidation(t *testing.T) {
-	for _, tt := range []struct {
-		text  string
-		valid bool
-	}{{"", false}, {"\xff", false}, {"hello\n世界\n", true}, {strings.Repeat("a", 64000), true}, {strings.Repeat("é", 32001), false}} {
-		if (validateText(tt.text) == nil) != tt.valid {
-			t.Errorf("unexpected validation for %d bytes", len(tt.text))
+func TestDeviceResolutionRequiresExactAlias(t *testing.T) {
+	d := []direct.Device{{Alias: "iPad", ID: "a"}, {Alias: "iPad Pro", ID: "b"}}
+	got, err := resolveDevice(d, "IPAD")
+	if err != nil || got.ID != "a" {
+		t.Fatal("exact case-insensitive lookup failed")
+	}
+	if _, err := resolveDevice(d, "pad"); err == nil {
+		t.Fatal("partial alias selected unintended recipient")
+	}
+}
+func TestLabelsStripTerminalControl(t *testing.T) {
+	if safeLabel("iPad\x1b\n\u202e") != "iPad" {
+		t.Fatal("unsafe terminal label")
+	}
+}
+func TestRelayImportPrivateAndNoSecretOutput(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	source := filepath.Join(t.TempDir(), "relay.json")
+	secret := strings.Repeat("a", 43)
+	if err := os.WriteFile(source, []byte(`{"url":"https://notify.example.com","token":"`+secret+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"relay", source}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), secret) {
+		t.Fatal("secret in output")
+	}
+	st, err := os.Stat(filepath.Join(dir, "clipsend-native", "relay.json"))
+	if err != nil || st.Mode().Perm() != 0600 {
+		t.Fatal("relay config not private")
+	}
+	if err := os.Chmod(source, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRelaySettings(source); err == nil {
+		t.Fatal("accepted public credentials")
+	}
+}
+func TestRelayOriginValidation(t *testing.T) {
+	for _, u := range []string{"http://example.com", "https://user:password@example.com", "https://example.com/path", "https://example.com?secret=x", "file:///etc/passwd"} {
+		if (relaySettings{URL: u, Token: strings.Repeat("a", 43)}).validate() == nil {
+			t.Fatalf("accepted %s", u)
 		}
 	}
 }
 
-func TestAliasValidation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "aliases.json")
-	if _, err := loadAliases(path); err != nil {
-		t.Fatal(err)
-	}
-	for _, value := range []string{`{"iphone":"Example Phone"}`, `{"iphone":""}`, `{"iphone":"a","IPHONE":"b"}`, `[]`, `{`} {
-		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
-			t.Fatal(err)
-		}
-		_, err := loadAliases(path)
-		if (err == nil) != (value == `{"iphone":"Example Phone"}`) {
-			t.Fatalf("%s: %v", value, err)
+func TestOperatorSettingsRequireExplicitExclusivePath(t *testing.T) {
+	token := strings.Repeat("a", 43)
+	for _, c := range []relaySettings{
+		{OperatorConfig: "relative.json", Token: token},
+		{OperatorConfig: "/private/operator.json", URL: "https://example.com", Token: token},
+		{OperatorConfig: "/private/operator.json"},
+	} {
+		if c.validate() == nil {
+			t.Fatal("accepted ambiguous or invalid operator config")
 		}
 	}
-}
-
-func TestDeviceLabelCannotInjectTerminalControls(t *testing.T) {
-	if got := safeLabel("Phone\x1b\n\r\t"); got != "Phone" {
-		t.Fatal(got)
-	}
-}
-
-func TestHelpDoesNotReadClipboardOrCreateConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", home)
-	if err := run(context.Background(), []string{"--help"}, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+	if err := (relaySettings{OperatorConfig: "/private/operator.json", Token: token}).validate(); err != nil {
 		t.Fatal(err)
-	}
-	entries, err := os.ReadDir(home)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("help created config: %v, %v", entries, err)
-	}
-}
-
-func TestEmptyClipboardStopsBeforeDiscovery(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", home)
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "wl-paste"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin)
-	err := run(context.Background(), []string{"iphone"}, strings.NewReader(""), io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "empty") {
-		t.Fatalf("unexpected result: %v", err)
-	}
-	entries, err := os.ReadDir(home)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("empty clipboard created identity: %v, %v", entries, err)
-	}
-}
-
-func TestPickerInterrupt(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	r, w := io.Pipe()
-	defer r.Close()
-	defer w.Close()
-	cancel()
-	_, err := chooseDevice(ctx, []Device{{Alias: "Phone"}}, "", r, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "cancelled") {
-		t.Fatalf("unexpected result: %v", err)
 	}
 }
