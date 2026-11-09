@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"clipsend/internal/push"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -29,11 +29,14 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
+	if len(args) > 0 && (args[0] == "pair" || args[0] == "unpair" || args[0] == "notify") {
+		return companionCommand(ctx, args, out)
+	}
 	flags := flag.NewFlagSet("clipsend", flag.ContinueOnError)
 	flags.SetOutput(errOut)
 	list := flags.Bool("list", false, "list available LocalSend devices")
 	flags.Usage = func() {
-		fmt.Fprintln(errOut, "Usage: clipsend [iphone|ipad|device name]\n       clipsend --list\n\nSend clipboard text as a LocalSend message. With no destination, choose\na device in the terminal. Open LocalSend on the receiving device first.\nNo files, desktop notifications, or background service.")
+		fmt.Fprintln(errOut, "Usage: clipsend [iphone|ipad|device name]\n       clipsend --list\n\nSend clipboard text as a LocalSend message. With no destination, choose\na device in the terminal. Open LocalSend on the receiving device first.\nNo files, desktop notifications, or background service.\n\nOptional companion setup: clipsend pair <alias> [pairing.json]\n                         clipsend unpair <alias>\n                         clipsend notify <alias>")
 	}
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -55,29 +58,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	}
 	var text string
 	if !*list {
-		clipCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(clipCtx, "wl-paste", "--no-newline", "--type", "text")
-		pipe, err := cmd.StdoutPipe()
+		data, err := readClipboard(ctx)
 		if err != nil {
 			return err
-		}
-		if err := cmd.Start(); err != nil {
-			return errors.New("cannot read clipboard; install wl-clipboard and run inside your Wayland session")
-		}
-		data, readErr := io.ReadAll(io.LimitReader(pipe, 64001))
-		if len(data) > 64000 {
-			_ = cmd.Process.Kill()
-		}
-		waitErr := cmd.Wait()
-		if readErr != nil {
-			return readErr
-		}
-		if len(data) > 64000 {
-			return errors.New("clipboard exceeds 64,000 bytes; nothing sent")
-		}
-		if waitErr != nil {
-			return errors.New("cannot read text from the clipboard")
 		}
 		text = string(data)
 		if err := validateText(text); err != nil {
@@ -94,7 +77,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	if err != nil {
 		return err
 	}
-	if len(devices) == 0 {
+	if len(devices) == 0 && (*list || flags.Arg(0) == "") {
 		return errors.New("no devices found; open LocalSend on your iPhone or iPad on the same LAN")
 	}
 	if *list {
@@ -110,17 +93,18 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			break
 		}
 	}
-	device, err := chooseDevice(ctx, devices, target, in, out)
-	if err != nil {
-		return err
+	service := deliveryService{
+		discover: func(ctx context.Context) ([]Device, error) {
+			limited, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			return sender.Discover(limited)
+		},
+		send:     sender.Send,
+		notify:   func(ctx context.Context) (bool, error) { return push.Notify(ctx, dir, strings.ToLower(flags.Arg(0))) },
+		wait:     90 * time.Second,
+		interval: time.Second,
 	}
-	sendCtx, sendCancel := context.WithTimeout(ctx, 120*time.Second)
-	defer sendCancel()
-	if err := sender.Send(sendCtx, device, text); err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "Sent to %s.\n", safeLabel(device.Alias))
-	return nil
+	return service.deliver(ctx, devices, target, text, in, out)
 }
 
 func validateText(text string) error {
@@ -189,7 +173,7 @@ func chooseDevice(ctx context.Context, devices []Device, target string, in io.Re
 		if len(matches) > 1 {
 			return Device{}, errors.New("destination is ambiguous; use the full device name or IP from --list")
 		}
-		return Device{}, fmt.Errorf("device %q is unavailable; open LocalSend on it and try again", safeLabel(target))
+		return Device{}, fmt.Errorf("%w: %q; open LocalSend on it and try again", errDeviceUnavailable, safeLabel(target))
 	}
 	for i, d := range devices {
 		fmt.Fprintf(out, "%d. %s\n", i+1, safeLabel(d.Alias))

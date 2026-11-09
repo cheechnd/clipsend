@@ -1,0 +1,5 @@
+version: 1
+bundleID: dev.cheechnd.clipsend
+infoPath: Info.plist
+entitlementsPath: ClipSend.entitlements
+iconPath: Resources/AppIcon.png

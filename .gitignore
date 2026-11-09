@@ -2,3 +2,10 @@
 *.pem
 *.key
 .env
+
+# Apple development artifacts
+*.p8
+*.mobileprovision
+*.ipa
+*.xip
+.local/
