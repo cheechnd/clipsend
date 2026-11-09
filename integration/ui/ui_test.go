@@ -131,7 +131,13 @@ func start(t *testing.T) (*harness, string) {
 	if err := os.WriteFile(filepath.Join(stubDir, "wl-copy"), []byte("#!/bin/sh\ncat > \"$CLIPSEND_TEST_CLIPBOARD\"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	h.cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+dir, "XDG_CACHE_HOME="+dir, "XDG_RUNTIME_DIR="+dir, "CLIPSEND_TEST_CLIPBOARD="+filepath.Join(dir, "clipboard-fixture"), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(stubDir, "wl-paste"), []byte("#!/bin/sh\n[ \"$3\" = text ] || exit 1\ncat \"$CLIPSEND_TEST_CLIPBOARD\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stubDir, "xdg-open"), []byte("#!/bin/sh\n[ \"$#\" = 1 ] || exit 1\nprintf '%s' \"$1\" > \"$CLIPSEND_TEST_OPEN\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	h.cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+dir, "XDG_CACHE_HOME="+dir, "XDG_RUNTIME_DIR="+dir, "TMPDIR="+dir, "CLIPSEND_TEST_OPEN="+filepath.Join(dir, "opened-fixture"), "CLIPSEND_TEST_CLIPBOARD="+filepath.Join(dir, "clipboard-fixture"), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	h.cmd.Stderr = &h.logs
 	h.in, err = h.cmd.StdinPipe()
 	if err != nil {
@@ -308,8 +314,34 @@ func TestRealUIReceiveIntegrityAndRevocation(t *testing.T) {
 	}
 	h.send("overwrite", "save", event{"transferId": id, "itemId": "file1", "path": target})
 	h.wait("overwrite", "error")
+	h.send("open", "open", event{"transferId": id, "itemId": "file1", "path": "/etc/passwd"})
+	if e := h.wait("open", "result"); e["state"] != "opened" {
+		t.Fatalf("missing opened state: %v", e)
+	}
+	previewName, err := os.ReadFile(filepath.Join(h.config, "opened-fixture"))
+	if err != nil || filepath.Base(string(previewName)) != "attachment.txt" || string(previewName) == target {
+		t.Fatal("Open did not use a private typed preview")
+	}
+	h.send("open-again", "open", event{"transferId": id, "itemId": "file1"})
+	h.wait("open-again", "result")
+	again, _ := os.ReadFile(filepath.Join(h.config, "opened-fixture"))
+	if !bytes.Equal(previewName, again) {
+		t.Fatal("repeated Open duplicated preview")
+	}
+	h.send("open-path", "open", event{"transferId": id, "itemId": "/etc/passwd", "path": target})
+	if e := h.wait("open-path", "error"); e["code"] != "open_failed" {
+		t.Fatalf("wrong open error: %v", e)
+	}
 	h.send("clear", "clear", event{"transferId": id})
 	h.wait("clear", "result")
+	previewBytes, err := os.ReadFile(string(previewName))
+	if err != nil || !bytes.Equal(previewBytes, data) {
+		t.Fatal("Clear removed or changed opened preview")
+	}
+	h.send("open-cleared", "open", event{"transferId": id, "itemId": "file1"})
+	if e := h.wait("open-cleared", "error"); e["code"] != "open_failed" {
+		t.Fatalf("cleared item could reopen: %v", e)
+	}
 	h.send("empty", "inbox", event{})
 	empty := h.wait("empty", "result")
 	if entries, ok := empty["items"].([]any); ok && len(entries) != 0 {
@@ -491,6 +523,27 @@ func TestUISendWithReceiveEnabledAndNotification(t *testing.T) {
 		t.Fatalf("ack HTTP %d", code)
 	}
 	h.wait("send", "result")
+	// Exercise the panel's clipboard path, not explicit text or CLI --stdin.
+	clipboardText := "Panel clipboard text ✓\nsecond line"
+	if err := os.WriteFile(filepath.Join(h.config, "clipboard-fixture"), []byte(clipboardText), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.send("clipboard-send", "send", event{"alias": "fixture"})
+	select {
+	case clipboardPush := <-pushes:
+		n := clipboardPush["notification"].(map[string]any)
+		transfer := n["transferID"].(string)
+		status, b := request(t, client, "GET", endpoint+"/v1/transfers/"+transfer, secret, nil)
+		var received event
+		json.Unmarshal(b, &received)
+		if status != 200 || received["text"] != clipboardText {
+			t.Fatal("panel clipboard text was lost or changed")
+		}
+		request(t, client, "POST", endpoint+"/v1/transfers/"+transfer+"/ack", secret, nil)
+		h.wait("clipboard-send", "result")
+	case <-time.After(5 * time.Second):
+		t.Fatal("panel clipboard send failed before notification")
+	}
 	h.send("still-on", "receive", event{"enabled": true})
 	h.wait("still-on", "result")
 	for attempt := 0; attempt < 2; attempt++ {

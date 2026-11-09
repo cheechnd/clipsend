@@ -24,19 +24,49 @@ Item {
   property var requestActions: ({})
   property string selectedAlias: ""
   property var devices: []
-  property var inbox: []
+  property var rawInbox: []
+  property var pendingClears: []
+  readonly property var inbox: rawInbox.filter(function(item) { return root.pendingClears.indexOf(String(item.transferId)) < 0 })
+  property bool revealInbox: false
+  function clearItem(id) {
+    if (pendingClears.indexOf(String(id)) >= 0) return
+    pendingClears = pendingClears.concat([String(id)])
+    undoTimer.restart()
+  }
+  function clearAll() {
+    var ids = inbox.map(function(item) { return String(item.transferId) })
+    if (!ids.length) return
+    pendingClears = pendingClears.concat(ids)
+    undoTimer.restart()
+  }
+  function undoClear() { undoTimer.stop(); pendingClears = [] }
+  function commitClears() {
+    var ids = pendingClears.slice()
+    var submitted = ids.filter(function(id) { return root.request("clear", { transferId: id }) !== "" })
+    rawInbox = rawInbox.filter(function(item) { return submitted.indexOf(String(item.transferId)) < 0 })
+    pendingClears = []
+  }
+  Timer { id: undoTimer; interval: 8000; onTriggered: root.commitClears() }
   property var pairing: null
   property var approval: null
   property string notice: ""
+  property string noticeKind: "info"
+  property string noticeAction: ""
   property bool receiving: false
   property string receiveEndpoint: ""
+
+  function setNotice(message, kind, action) {
+    noticeKind = kind || "info"
+    noticeAction = action || ""
+    notice = message
+  }
 
   function start(candidate) {
     var path = String(candidate || "clipsend").trim()
     desiredExecutable = path || "clipsend"
     if (started) {
-      if (desiredExecutable !== executable) notice = "Executable changed; restart the connection to apply it"
-      else if (notice === "Executable changed; restart the connection to apply it") notice = "Connected"
+      if (desiredExecutable !== executable) setNotice("Executable changed; restart the connection to apply it")
+      else if (notice === "Executable changed; restart the connection to apply it") setNotice("Connected")
       return false
     }
     executable = desiredExecutable
@@ -50,14 +80,14 @@ Item {
       command.push("--port", String(fixturePort))
     uiProcess.command = command
     started = true
-    notice = "Starting ClipSend…"
+    setNotice("Starting ClipSend…")
     uiProcess.running = true
     return true
   }
 
   function request(command, fields) {
     if (!uiProcess.running) {
-      notice = "ClipSend UI process is unavailable"
+      setNotice("ClipSend UI process is unavailable", "error", command)
       return ""
     }
     requestSerial++
@@ -73,8 +103,8 @@ Item {
   function refresh() { request("devices"); request("inbox") }
 
   function send(alias, files) {
-    if (activeRequest) { notice = "A transfer is already in progress"; return }
-    if (!alias) { notice = "Pair a device to send"; return }
+    if (activeRequest) { setNotice("A transfer is already in progress"); return }
+    if (!alias) { setNotice("Pair a device to send"); return }
     var fields = { alias: alias }
     var payload = { alias: alias, files: files && files.length ? files.slice() : [], source: files && files.length ? "files" : "clipboard" }
     if (payload.files.length) fields.files = payload.files
@@ -83,7 +113,7 @@ Item {
     activeRequest = id
     activePayload = payload
     failedSend = null
-    notice = files && files.length ? "Preparing files…" : "Preparing clipboard…"
+    setNotice(files && files.length ? "Preparing files…" : "Preparing clipboard…")
   }
 
   function retryFailed() {
@@ -102,7 +132,7 @@ Item {
     pairCancelling = false
     pairing = null
     approval = null
-    notice = "Restarting ClipSend…"
+    setNotice("Restarting ClipSend…")
     if (uiProcess.running) {
       restartRequested = true
       uiProcess.running = false
@@ -115,8 +145,8 @@ Item {
 
   function cancelActive() {
     if (!activeRequest) return
-    request("cancel", { requestId: activeRequest })
-    notice = "Cancelling transfer…"
+    if (!request("cancel", { requestId: activeRequest })) return
+    setNotice("Cancelling transfer…")
   }
 
   function cancelPairing() {
@@ -124,7 +154,7 @@ Item {
     if (!request("cancel", { requestId: pairRequest })) return
     pairCancelling = true
     pairing = null
-    notice = "Cancelling pairing…"
+    setNotice("Cancelling pairing…")
   }
 
   function receiveLine(line) {
@@ -133,9 +163,9 @@ Item {
     var next = UiState.reduce({
       requestActions: requestActions, activeRequest: activeRequest,
       activePayload: activePayload, failedSend: failedSend,
-      pairRequest: pairRequest, pairCancelling: pairCancelling, devices: devices, inbox: inbox,
+      pairRequest: pairRequest, pairCancelling: pairCancelling, devices: devices, inbox: rawInbox,
       selectedAlias: selectedAlias, receiving: receiving,
-      receiveEndpoint: receiveEndpoint, notice: notice,
+      receiveEndpoint: receiveEndpoint, notice: notice, noticeKind: noticeKind, noticeAction: noticeAction,
       pairing: pairing, approval: approval
     }, event)
     requestActions = next.requestActions || requestActions
@@ -145,14 +175,20 @@ Item {
     pairRequest = next.pairRequest || ""
     pairCancelling = next.pairCancelling === true
     devices = next.devices || []
-    inbox = next.inbox || []
+    rawInbox = next.inbox || []
     selectedAlias = next.selectedAlias || ""
     receiving = next.receiving === true
     receiveEndpoint = next.receiveEndpoint || ""
     notice = next.notice || ""
+    noticeKind = next.noticeKind || "info"
+    noticeAction = next.noticeAction || ""
     pairing = next.pairing || null
     approval = next.approval || null
     for (let i = 0; i < (next.effects || []).length; i++) request(next.effects[i])
+    if (event.version === 1 && event.type === "incoming") {
+      revealInbox = true
+      if (shell) shell.summon("clipsend.omarchy", "{}")
+    }
   }
 
   Process {
@@ -170,7 +206,9 @@ Item {
       root.pairCancelling = false
       root.receiving = false
       root.receiveEndpoint = ""
-      root.inbox = []
+      root.rawInbox = []
+      root.pendingClears = []
+      undoTimer.stop()
       root.pairing = null
       root.approval = null
       root.requestActions = ({})
@@ -179,7 +217,7 @@ Item {
         root.start(root.desiredExecutable)
         root.refresh()
       } else {
-        root.notice = "ClipSend UI stopped (" + code + "). Choose Restart connection to reconnect."
+        root.setNotice("ClipSend UI stopped (" + code + "). Choose Restart connection to reconnect.", "error")
       }
     }
   }

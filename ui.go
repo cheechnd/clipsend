@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -165,6 +166,8 @@ func uiCommand(ctx context.Context, args []string, in io.Reader, out, errOut io.
 	}
 	defer store.Close()
 	writer := &uiWriter{w: bufio.NewWriter(out)}
+	previews := newUIPreviews()
+	defer previews.close()
 	jobs := map[string]context.CancelFunc{}
 	var jobsMu sync.Mutex
 	scanner := bufio.NewScanner(in)
@@ -476,12 +479,20 @@ func uiCommand(ctx context.Context, args []string, in io.Reader, out, errOut io.
 					if currentInbox == nil {
 						result(map[string]any{"items": []any{}})
 					} else {
-						result(map[string]any{"items": inboxViews(currentInbox.Items(), store)})
+						result(map[string]any{"items": inboxViews(currentInbox, store)})
 					}
-				case "clear", "copy", "save":
+				case "clear", "copy", "save", "open":
 					stateMu.Lock()
 					currentInbox := inbox
 					stateMu.Unlock()
+					if q.Command == "open" {
+						if e := previews.openInbox(currentInbox, q.TransferID, q.ItemID); e != nil {
+							fail("open_failed", e.Error())
+						} else {
+							result(map[string]any{"state": "opened"})
+						}
+						return
+					}
 					if currentInbox == nil {
 						fail("not_found", "inbox item not found")
 						return
@@ -546,7 +557,8 @@ func sendUI(parent context.Context, dir string, s *direct.Store, q uiRequest, w 
 		}
 	}
 	if len(files) == 0 && text == "" {
-		text, textErr := readClipboard(parent)
+		var textErr error
+		text, textErr = readClipboard(parent)
 		if textErr != nil {
 			imagePath, imageErr := readClipboardPNG(parent)
 			if imageErr == nil {
@@ -717,7 +729,7 @@ func receiveHandler(store *direct.Store, inbox *direct.Inbox, events *uiWriter) 
 			for _, x := range inbox.Items() {
 				if x.ID == id {
 					d, _ := store.Device(dev.ID)
-					events.emit("incoming", "incoming", map[string]any{"transferId": id, "alias": safeLabel(d.Alias), "text": x.Text, "attachments": x.Attachments})
+					events.emit("incoming", "incoming", map[string]any{"transferId": id, "alias": safeLabel(d.Alias), "text": x.Text, "attachments": inboxAttachments(inbox, x)})
 					break
 				}
 			}
@@ -900,6 +912,221 @@ func saveNoOverwrite(src, dst string) error {
 	}
 	return nil
 }
+
+const uiPreviewRetention = 24 * time.Hour
+
+type uiPreviews struct {
+	mu    sync.Mutex
+	files map[[2]string]string
+	done  chan struct{}
+	wg    sync.WaitGroup
+}
+
+func newUIPreviews() *uiPreviews {
+	p := &uiPreviews{files: make(map[[2]string]string), done: make(chan struct{})}
+	p.cleanup(time.Now())
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-p.done:
+				return
+			case now := <-ticker.C:
+				p.cleanup(now)
+			}
+		}
+	}()
+	return p
+}
+
+func (p *uiPreviews) close() { close(p.done); p.wg.Wait() }
+
+func (p *uiPreviews) cleanup(now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entries, _ := os.ReadDir(os.TempDir())
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "clipsend-preview-") || !entry.IsDir() {
+			continue
+		}
+		st, err := entry.Info()
+		if err != nil || st.Mode().Perm() != 0700 || now.Sub(st.ModTime()) < uiPreviewRetention {
+			continue
+		}
+		if sys, ok := st.Sys().(*syscall.Stat_t); !ok || sys.Uid != uint32(os.Getuid()) {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(os.TempDir(), entry.Name()))
+	}
+	for key, file := range p.files {
+		if _, err := os.Stat(file); err != nil {
+			delete(p.files, key)
+		}
+	}
+}
+
+// openInbox only accepts inbox IDs. Neither sender filenames/MIME declarations
+// nor the UI request's path may select a file or its desktop handler.
+func (previews *uiPreviews) openInbox(b *direct.Inbox, transfer, item string) error {
+	previews.mu.Lock()
+	defer previews.mu.Unlock()
+	if b == nil {
+		return errors.New("inbox attachment unavailable")
+	}
+	p, err := b.File(transfer, item)
+	if err != nil {
+		return errors.New("inbox attachment unavailable")
+	}
+	key := [2]string{transfer, item}
+	if preview := previews.files[key]; preview != "" {
+		if _, err := os.Stat(preview); err == nil {
+			now := time.Now()
+			if err := os.Chtimes(filepath.Dir(preview), now, now); err != nil {
+				return errors.New("could not retain attachment preview")
+			}
+			return launchInboxPreview(preview)
+		}
+		delete(previews.files, key)
+	}
+	f, err := openInboxFile(p)
+	if err != nil {
+		return errors.New("inbox attachment unavailable")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, direct.MaxItemBytes+1))
+	f.Close()
+	if err != nil || int64(len(data)) > direct.MaxItemBytes {
+		return errors.New("could not read inbox attachment")
+	}
+	_, suffix := inboxPreviewType(data)
+	if suffix == "" {
+		return errors.New("this attachment cannot be opened safely; save it instead")
+	}
+	dir, err := os.MkdirTemp("", "clipsend-preview-")
+	if err != nil {
+		return errors.New("could not prepare attachment preview")
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			_ = os.RemoveAll(dir)
+		}
+	}()
+	preview, err := filepath.Abs(filepath.Join(dir, "attachment"+suffix))
+	if err != nil {
+		return errors.New("could not prepare attachment preview")
+	}
+	if err = os.WriteFile(preview, data, 0600); err != nil {
+		return errors.New("could not prepare attachment preview")
+	}
+	if err := launchInboxPreview(preview); err != nil {
+		return err
+	}
+	// Viewers may read lazily after the launcher exits. Clear and UI shutdown
+	// retain this copy; expiry is 24 hours after the most recent explicit Open.
+	previews.files[key] = preview
+	keep = true
+	return nil
+}
+
+func launchInboxPreview(preview string) error {
+	// Absolute, generated paths are a single argument, never a shell command,
+	// URI, sender-controlled extension, or executable file.
+	cmd := exec.Command("xdg-open", preview)
+	if err := cmd.Start(); err != nil {
+		return errors.New("could not start the system viewer")
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	// Some desktop handlers keep xdg-open alive for the viewer's lifetime.
+	// Reap it without tying that lifetime to the UI or killing the viewer.
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			return errors.New("the system viewer could not open this attachment")
+		}
+	case <-timer.C:
+	}
+	return nil
+}
+
+func openInboxFile(p string) (*os.File, error) {
+	fd, err := syscall.Open(p, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), p)
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || st.Size() > direct.MaxItemBytes {
+		f.Close()
+		return nil, errors.New("invalid inbox file")
+	}
+	return f, nil
+}
+
+// Identify HEIF-family files from a complete ISO BMFF file-type box. Go's
+// HTTP sniffer does not identify HEIC; extensions and incoming MIME are untrusted.
+func inboxHEIFType(data []byte) (string, string) {
+	if len(data) < 16 || string(data[4:8]) != "ftyp" {
+		return "", ""
+	}
+	n := int64(binary.BigEndian.Uint32(data[:4]))
+	if n < 16 || n > 4096 || n > int64(len(data)) || n%4 != 0 {
+		return "", ""
+	}
+	brands := map[string]bool{string(data[8:12]): true}
+	for i := 16; i < int(n); i += 4 {
+		brands[string(data[i:i+4])] = true
+	}
+	for _, kind := range []struct{ brand, mime, suffix string }{
+		{"avis", "image/avif", ".avif"}, {"avif", "image/avif", ".avif"},
+		{"hevc", "image/heic-sequence", ".heics"}, {"hevx", "image/heic-sequence", ".heics"},
+		{"heic", "image/heic", ".heic"}, {"heix", "image/heic", ".heic"},
+		{"msf1", "image/heif-sequence", ".heifs"}, {"mif1", "image/heif", ".heif"},
+	} {
+		if brands[kind.brand] {
+			return kind.mime, kind.suffix
+		}
+	}
+	return "", ""
+}
+
+func inboxPreviewType(data []byte) (string, string) {
+	if mime, suffix := inboxHEIFType(data); suffix != "" {
+		return mime, suffix
+	}
+	mime := http.DetectContentType(data)
+	suffix := map[string]string{
+		"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+		"image/webp": ".webp", "image/bmp": ".bmp", "image/x-icon": ".ico",
+		"application/pdf": ".pdf", "audio/mpeg": ".mp3", "audio/wave": ".wav",
+		"audio/aiff": ".aiff", "audio/basic": ".au", "application/ogg": ".ogg",
+		"video/mp4": ".mp4", "video/webm": ".webm", "video/avi": ".avi",
+	}[mime]
+	if suffix != "" {
+		return mime, suffix
+	}
+	if mime == "text/plain; charset=utf-8" && utf8.Valid(data) {
+		// Check the whole text, not just the sniffer's first 512 bytes. Active
+		// desktop entries and shebang scripts must never reach a desktop opener.
+		text := bytes.TrimSpace(bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf}))
+		if bytes.HasPrefix(text, []byte("<")) || bytes.Contains(data, []byte("#!")) || bytes.Contains(data, []byte("[Desktop Entry]")) {
+			return "", ""
+		}
+		for _, c := range data {
+			if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
+				return "", ""
+			}
+		}
+		return "text/plain", ".txt"
+	}
+	return "", ""
+}
+
 func copyInbox(b *direct.Inbox, transfer, item string) error {
 	for _, x := range b.Items() {
 		if x.ID == transfer {
@@ -1152,11 +1379,34 @@ func deviceViews(ds []direct.Device) []map[string]string {
 	}
 	return out
 }
-func inboxViews(xs []*direct.Incoming, s *direct.Store) []map[string]any {
+func inboxAttachments(b *direct.Inbox, x *direct.Incoming) []direct.IncomingAttachment {
+	attachments := append([]direct.IncomingAttachment(nil), x.Attachments...)
+	for i := range attachments {
+		p, err := b.File(x.ID, attachments[i].ID)
+		if err != nil {
+			continue
+		}
+		f, err := openInboxFile(p)
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(f, 4096))
+		f.Close()
+		if err == nil {
+			if mime, _ := inboxHEIFType(data); mime != "" {
+				attachments[i].MIME = mime
+			}
+		}
+	}
+	return attachments
+}
+
+func inboxViews(b *direct.Inbox, s *direct.Store) []map[string]any {
+	xs := b.Items()
 	out := make([]map[string]any, 0, len(xs))
 	for _, x := range xs {
 		d, _ := s.Device(x.DeviceID)
-		out = append(out, map[string]any{"transferId": x.ID, "alias": safeLabel(d.Alias), "text": x.Text, "attachments": x.Attachments})
+		out = append(out, map[string]any{"transferId": x.ID, "alias": safeLabel(d.Alias), "receivedAt": x.ReceivedAt, "text": x.Text, "attachments": inboxAttachments(b, x)})
 	}
 	return out
 }

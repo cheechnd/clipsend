@@ -12,8 +12,32 @@ import CryptoKit
     static let shared = CompanionModel()
     @Published private(set) var computers: [PairedComputer] = []
     @Published private(set) var messages: [ReceivedText] = []
+    struct PendingClear: Identifiable {
+        enum Content {
+            case received(ReceivedText)
+            case draft(text: String, files: [URL])
+        }
+        let id = UUID()
+        let contents: [Content]
+    }
+    @Published private(set) var pendingClear: PendingClear?
+    private var clearTask: Task<Void, Never>?
+    var pendingDraftFiles: [URL] {
+        (pendingClear?.contents ?? []).flatMap { content -> [URL] in
+            if case .draft(_, let files) = content { return files }
+            return []
+        }
+    }
+    private var retainedMessages: [ReceivedText] {
+        messages + (pendingClear?.contents ?? []).compactMap { content in
+            if case .received(let message) = content { return message }
+            return nil
+        }
+    }
     @Published var transferProgress: Double?
     @Published var transferStatus: String?
+    @Published private(set) var completedSendID: UUID?
+    @Published private(set) var openedNotificationID: UUID?
     @Published var receiveProgress: Double?
     private var transferTask: Task<Void, Never>?
     private lazy var inboxDirectory: URL = {
@@ -151,16 +175,61 @@ import CryptoKit
         guard store.save(updated) else { status = "Couldn’t remove this computer from Keychain."; return false }
         computers = updated; if computers.isEmpty { status = "Pair a computer to receive text." }; return true
     }
-    func clear(_ message: ReceivedText) { messages.removeAll { $0.id == message.id }; message.attachments.forEach { try? FileManager.default.removeItem(at: $0.fileURL.deletingLastPathComponent()) } }
+    func clear(_ message: ReceivedText) {
+        guard messages.contains(where: { $0.id == message.id }) else { return }
+        beginClear(.received(message))
+        messages.removeAll { $0.id == message.id }
+    }
+    func clearAll() { for message in messages { clear(message) } }
+    func clearDraft(text: String, files: [URL]) { beginClear(.draft(text: text, files: files)) }
+    private func beginClear(_ content: PendingClear.Content) {
+        clearTask?.cancel()
+        let pending = PendingClear(contents: (pendingClear?.contents ?? []) + [content])
+        pendingClear = pending
+        clearTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(8)) }
+            catch { return } // Cancellation must never fall through to file deletion.
+            guard !Task.isCancelled, self?.pendingClear?.id == pending.id else { return }
+            self?.commitClear()
+        }
+    }
+    func undoClear() -> [PendingClear.Content]? {
+        guard let pending = pendingClear else { return nil }
+        clearTask?.cancel(); clearTask = nil; pendingClear = nil
+        for content in pending.contents {
+            if case .received(let message) = content { messages.append(message) }
+        }
+        messages.sort { $0.receivedAt > $1.receivedAt }
+        return pending.contents
+    }
+    private func commitClear() {
+        clearTask?.cancel(); clearTask = nil
+        guard let pending = pendingClear else { return }
+        pendingClear = nil
+        let files = pending.contents.flatMap { content -> [URL] in
+            switch content {
+            case .received(let message): return message.attachments.map(\.fileURL)
+            case .draft(_, let urls): return urls
+            }
+        }
+        // Every staged attachment owns a unique child directory. Never remove the
+        // shared outbox root: a new draft/send may already be using it.
+        for file in files { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+    }
     func cancelTransfer() { transferTask?.cancel(); transferStatus = "Cancelling transfer…" }
     func cancelReceive() { receiveTask?.cancel(); receiveProgress = nil; status = "Receive cancelled. Tap Check now to retry." }
-    func send(text: String, files: [URL], to computerID: String) {
-        guard transferTask == nil, let computer = computers.first(where: { $0.computerID == computerID }) else { return }
+    func send(text: String, files: [URL], to computerID: String, finished: (() -> Void)? = nil) {
+        guard transferTask == nil, let computer = computers.first(where: { $0.computerID == computerID }) else { finished?(); return }
         transferProgress = 0; transferStatus = "Preparing send…"
         transferTask = Task { [weak self] in
+            defer { finished?() }
             guard let self else { return }
             defer { self.transferTask = nil; self.transferProgress = nil }
-            do { try await self.sendTo(computer, text: text, files: files); self.transferStatus = "Received by \(computer.name)." }
+            do {
+                try await self.sendTo(computer, text: text, files: files)
+                self.transferStatus = "Received by \(computer.name)."
+                self.completedSendID = UUID()
+            }
             catch is CancellationError { self.transferStatus = "Transfer cancelled. You can retry when the computer is available." }
             catch { self.transferStatus = "Couldn’t send. \(error.localizedDescription)" }
         }
@@ -216,7 +285,10 @@ import CryptoKit
         }
     }
     private func safeProtocolID(_ value: String) -> Bool { !value.isEmpty && value.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil }
-    func notificationReceived(_ metadata: PushMetadata) { receive(metadata.computerID, transferID: metadata.transferID, endpoints: metadata.endpoints) }
+    func notificationReceived(_ metadata: PushMetadata, opened: Bool = false) {
+        if opened { openedNotificationID = UUID() }
+        receive(metadata.computerID, transferID: metadata.transferID, endpoints: metadata.endpoints)
+    }
     func receive(_ computerID: String, transferID: String? = nil, endpoints: [String]? = nil) {
         let job = ReceiveJob(computerID: computerID, transferID: transferID, endpoints: endpoints ?? [])
         guard !receiveQueue.contains(where: { queued in
@@ -264,7 +336,7 @@ import CryptoKit
                         guard payload.id == item.id, TransferValidator.validate(payload, computerID: computer.computerID) else { throw ReceiverError.invalidResponse }
                         let key = TransferValidator.key(computerID: computer.computerID, transferID: payload.id)
                         if seen[key] == nil {
-                            guard messages.count < 32 else { status = "The inbox is full. Clear a received item before receiving another send."; continue }
+                            guard retainedMessages.count < 32 else { status = "The inbox is full. Clear a received item and wait for Undo to finish before receiving another send."; continue }
                             justPaired = false
                             let storedAttachments = try await downloadAttachments(payload.attachments ?? [], transferID: payload.id, endpoint: base, client: client, secret: computer.secret)
                             messages.insert(ReceivedText(computerID: computer.computerID, transferID: payload.id, senderName: payload.senderName, text: payload.text, receivedAt: .now, attachments: storedAttachments), at: 0)
@@ -286,7 +358,7 @@ import CryptoKit
         }
     }
     private func downloadAttachments(_ descriptors: [AttachmentDescriptor], transferID: String, endpoint: URL, client: PinnedClient, secret: String) async throws -> [ReceivedAttachment] {
-        let currentBytes = messages.flatMap(\.attachments).reduce(Int64(0)) { $0 + $1.descriptor.size }
+        let currentBytes = retainedMessages.flatMap(\.attachments).reduce(Int64(0)) { $0 + $1.descriptor.size }
         let incomingBytes = descriptors.reduce(Int64(0)) { $0 + $1.size }
         guard descriptors.count <= 16, descriptors.allSatisfy(AttachmentDescriptor.isValid), incomingBytes <= 256 * 1024 * 1024, currentBytes + incomingBytes <= 256 * 1024 * 1024 else { throw ReceiverError.inboxLimit }
         var files: [ReceivedAttachment] = []

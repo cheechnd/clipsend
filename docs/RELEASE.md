@@ -8,14 +8,27 @@ local implementation work.
 
 ## Personal enhancement build
 
-The functional enhancement scope is implemented; the interface-polish phase is
-not complete. The current panel and mobile screens are a working baseline, not
-the finished personal product. Remaining design work includes a clearer primary
-send/receive action, less repeated explanatory copy and nested framing, more
-discoverable attachment actions, and consistent transfer feedback across surfaces.
-That work needs visual and interaction review on the desktop, iPhone, and iPad,
-including keyboard, scrolling, touch targets, and transitions, before calling the
-polish phase complete.
+The functional enhancement scope and personal-use UI refinement are implemented
+and installed on desktop, iPhone, and iPad. The desktop uses native shell controls;
+the mobile apps have consistent navigation, image thumbnails, attachment actions,
+and a one-tap Paste & Send path that preserves unfinished composer drafts.
+
+Physical checks confirmed image Copy, mixed image/PDF deliveries, PDF Done,
+iPhone composer controls with the keyboard, and iPad send-and-clear behavior.
+Text Copy → Paste & Send round trips passed on both devices with Unicode and
+line breaks. Desktop incoming deliveries open Inbox automatically; attachment
+Open and immediate Clear/Undo were confirmed with an iPhone delivery.
+
+Clear all is available on all three surfaces. Native Clear all is accent-colored
+with items and gray/disabled when empty. Both states and Clear all → Undo restoring
+two items were checked on the physical iPhone and iPad. Desktop deliveries are
+ordered newest first and show receipt times. The desktop clipboard-text shadowing
+bug has a real-CLI regression test. Go race tests, Swift checks, signed builds,
+and offscreen desktop render/action checks pass.
+
+Broader VoiceOver, accessibility text sizes, and transition coverage remain release
+gates; the checks here cover the personal-use workflows, not exhaustive accessibility
+or distribution readiness.
 
 The optional Omarchy panel, clipboard images, attachment batches, and two-way
 transfers are implemented. Physical checks covered image previews and Copy on

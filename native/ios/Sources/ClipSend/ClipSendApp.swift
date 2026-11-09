@@ -46,7 +46,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             response.notification.request.trigger is UNPushNotificationTrigger
         let metadata = shouldReceive ? PushMetadata.parse(response.notification.request.content.userInfo) : nil
         Task { @MainActor in
-            if let metadata { CompanionModel.shared.notificationReceived(metadata) }
+            if let metadata { CompanionModel.shared.notificationReceived(metadata, opened: true) }
             completionHandler()
         }
     }

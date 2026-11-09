@@ -72,3 +72,40 @@ func TestInboxReservesDeclaredQuotaAndRejectsUnsafeIDs(t *testing.T) {
 		t.Fatal("declared pending quota was not reserved")
 	}
 }
+
+func TestInboxNewestFirstStableAcrossRefreshAndClear(t *testing.T) {
+	b, err := NewInbox(filepath.Join(t.TempDir(), "inbox"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	var ids []string
+	for _, device := range []string{"ipad", "iphone", "iphone"} {
+		x, err := b.Create(device, "same clipboard text", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = b.Complete(x.ID); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, x.ID)
+	}
+	for range 50 {
+		items := b.Items()
+		for i, x := range items {
+			if x.ID != ids[len(ids)-1-i] || x.ReceivedAt.IsZero() {
+				t.Fatal("inbox order changed or receipt time missing")
+			}
+		}
+		if items[0].DeviceID != "iphone" || items[2].DeviceID != "ipad" {
+			t.Fatal("sender attribution changed")
+		}
+	}
+	if err = b.Clear(ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	items := b.Items()
+	if len(items) != 2 || items[0].ID != ids[2] || items[1].ID != ids[0] {
+		t.Fatal("clear changed remaining order")
+	}
+}

@@ -86,3 +86,19 @@ Camera pairing, first-run setup, direct receipt, Copy, notification opening and
 lock-screen delivery have been tested on physical iPhone and iPad devices.
 Broader permission-recovery, VoiceOver, Dynamic Type, and layout coverage remain
 release gates; compilation and portable checks do not establish those outcomes.
+
+## Sending from the app
+
+Choose a computer in **Send**, then tap **Paste & Send** to send the clipboard
+directly. Text, links, copied images, and file references are supported within the
+normal transfer limits; unsupported content produces an explicit error. The app
+reads the clipboard only after that action. iOS may request paste permission.
+
+Expand **Write or add files** to compose text or choose Photos/Files before sending.
+A quick clipboard send does not replace or clear an unfinished composer draft.
+
+Clear all removes the current inbox as one undoable batch. Clear removes received
+items or a composer draft immediately, with an eight-second
+Undo window. Consecutive clears share that window. Files remain private and count
+toward storage limits until the window expires; Undo restores them without another
+transfer. Removing a paired computer still asks for confirmation.

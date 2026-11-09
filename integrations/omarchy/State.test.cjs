@@ -80,7 +80,8 @@ const result = (id, extra = {}) => ({ version: 1, id, type: 'result', ...extra }
 {
   const state = reduce(base(), { version: 1, id: 'pair1', type: 'error', code: 'cancelled' });
   assert.equal(state.pairing, null);
-  assert.equal(state.notice, 'cancelled');
+  assert.equal(state.notice, 'Pairing cancelled');
+  assert.equal(state.noticeKind, 'info');
   assert.deepEqual(json(state.effects), []);
 }
 
@@ -109,10 +110,12 @@ const result = (id, extra = {}) => ({ version: 1, id, type: 'result', ...extra }
   const label = '<img src="https://invalid.example/pixel">';
   const state = reduce(base(), { version: 1, type: 'devices', devices: [{ alias: label }] });
   assert.equal(state.selectedAlias, label);
-  const qml = fs.readFileSync(path.join(__dirname, 'Panel.qml'), 'utf8');
-  assert.match(qml, /textFormat:\s*Text\.PlainText/);
-  assert.match(qml, /text:\s*String\(deviceRow\.modelData\.alias \|\| deviceRow\.modelData\.name \|\| "Device"\);\s*textFormat:\s*Text\.PlainText/);
-  assert.match(qml, /text:\s*String\(transferCard\.modelData\.text \|\| ""\);\s*textFormat:\s*Text\.PlainText/);
+  const qml = fs.readFileSync(path.join(__dirname, 'PanelContent.qml'), 'utf8');
+  const labelComponent = fs.readFileSync(path.join(__dirname, 'Label.qml'), 'utf8');
+  assert.match(labelComponent, /textFormat:\s*Text\.PlainText/);
+  assert.doesNotMatch(qml, /(?:^|\n)\s*Text\s*\{/);
+  assert.match(qml, /text: String\(transfer\.modelData\.text/);
+
 }
 
 // Service owns one backend per shell; bar views contain no process and expose open/close methods for shell hotkeys.
@@ -129,9 +132,100 @@ const result = (id, extra = {}) => ({ version: 1, id, type: 'result', ...extra }
   assert.match(qml, /function close\(\)/);
   assert.match(service, /property bool receiving: false/);
   assert.match(service, /if \(activeRequest\).*A transfer is already in progress/);
-  assert.match(qml, /drag\.accepted = drag\.hasUrls && !root\.activeRequest/);
-  assert.match(qml, /paths\.length && !root\.activeRequest/);
+  const content = fs.readFileSync(path.join(__dirname, "PanelContent.qml"), "utf8");
+  assert.match(content, /drag\.accepted = drag\.hasUrls && !!root\.selectedAlias && !root\.sending/);
+  assert.match(content, /paths\.length && root\.selectedAlias && !root\.sending/);
   assert.match(service, /Component\.onDestruction: uiProcess\.running = false/);
 }
 
+// Failed actions carry context without routine refresh overwriting the error.
+{
+  let state = reduce({ ...base(), requestActions: { copy1: 'copy', devices1: 'devices' } },
+    { version: 1, id: 'copy1', type: 'error', message: 'Delivery expired' });
+  assert.equal(state.noticeKind, 'error');
+  assert.equal(state.noticeAction, 'copy');
+  state = reduce(state, result('devices1', { devices: [] }));
+  assert.equal(state.noticeKind, 'error');
+  assert.equal(state.notice, 'Delivery expired');
+  state.requestActions = { save1: 'save' };
+  state = reduce(state, result('save1'));
+  assert.equal(state.noticeKind, 'success');
+  assert.equal(state.notice, 'Saved');
+}
+
+// A successful clear/approval after a send error replaces the whole notice.
+for (const action of ['clear', 'approve']) {
+  let state = reduce({ ...base(), requestActions: { send1: 'send', next1: action }, activeRequest: 'send1',
+    activePayload: { alias: 'iPhone', files: [], source: 'clipboard' } },
+  { version: 1, id: 'send1', type: 'error', message: 'iPhone did not respond' });
+  assert.equal(state.notice, 'iPhone did not respond');
+  assert.equal(state.noticeKind, 'error');
+  assert.equal(state.noticeAction, 'send');
+  state = reduce(state, result('next1'));
+  assert.equal(state.notice, action === 'clear' ? 'Cleared' : '');
+  assert.equal(state.noticeKind, 'success');
+  assert.equal(state.noticeAction, action);
+  assert.equal(state.failedSend.alias, 'iPhone');
+}
+
+// Local status changes replace stale error metadata, including cancellation after Save fails.
+{
+  const qml = fs.readFileSync(path.join(__dirname, 'Service.qml'), 'utf8');
+  const service = {
+    notice: 'Save failed', noticeKind: 'error', noticeAction: 'save',
+    activeRequest: 'send1', pairRequest: 'pair1', pairCancelling: false,
+    requestSerial: 0, requestActions: {}, started: true, executable: 'clipsend',
+    uiProcess: { running: true, write() {} },
+    Quickshell: { env() { return ''; } }
+  };
+  vm.createContext(service);
+  for (const name of ['setNotice', 'request', 'start', 'send', 'cancelActive', 'cancelPairing', 'restart']) {
+    const method = qml.match(new RegExp('  function ' + name + '\\([^]*?\\n  }'));
+    assert.ok(method, name + ' is available for transport-isolated testing');
+    vm.runInContext(method[0], service);
+  }
+  function afterError(action, message) {
+    service.notice = 'Delivery expired';
+    service.noticeKind = 'error';
+    service.noticeAction = 'save';
+    action();
+    assert.equal(service.notice, message);
+    assert.equal(service.noticeKind, 'info');
+    assert.equal(service.noticeAction, '');
+  }
+  afterError(() => service.cancelActive(), 'Cancelling transfer…');
+  afterError(() => service.cancelPairing(), 'Cancelling pairing…');
+  afterError(() => service.send('Desk', []), 'A transfer is already in progress');
+  service.activeRequest = '';
+  afterError(() => service.send('', []), 'Pair a device to send');
+  afterError(() => service.send('Desk', []), 'Preparing clipboard…');
+  service.activeRequest = '';
+  afterError(() => service.send('Desk', ['/tmp/report.pdf']), 'Preparing files…');
+  afterError(() => service.start('/tmp/candidate'), 'Executable changed; restart the connection to apply it');
+  service.noticeKind = 'error'; service.noticeAction = 'save';
+  service.start('clipsend');
+  assert.equal(service.notice, 'Connected');
+  assert.equal(service.noticeKind, 'info');
+  assert.equal(service.noticeAction, '');
+  afterError(() => service.restart(), 'Restarting ClipSend…');
+  service.started = false;
+  afterError(() => service.start('clipsend'), 'Starting ClipSend…');
+  // A failed cancellation must preserve its own failure, not claim cancellation.
+  service.uiProcess.running = false;
+  service.activeRequest = 'send2';
+  service.cancelActive();
+  assert.equal(service.notice, 'ClipSend UI process is unavailable');
+  assert.equal(service.noticeKind, 'error');
+  assert.equal(service.noticeAction, 'cancel');
+}
+
+// Deferred clear failures must restore the actual backend inbox; Open has its own result.
+{
+  const state = { ...base(), requestActions: { c: 'clear', o: 'open' } };
+  const failed = reduce(state, { version: 1, id: 'c', type: 'error', message: 'Unavailable' });
+  assert.deepEqual(json(failed.effects), ['inbox']);
+  const opened = reduce(state, result('o'));
+  assert.equal(opened.notice, 'Opened');
+  assert.equal(opened.noticeAction, 'open');
+}
 console.log('Omarchy ClipSend UI state checks passed');

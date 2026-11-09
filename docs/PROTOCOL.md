@@ -106,7 +106,7 @@ exit. The persistent listener also accepts authenticated `/v1/device/token` refr
 
 `clipsend ui` accepts version-1 JSONL commands on stdin and emits correlated
 events on stdout. Commands include devices, send, cancel, pair, approve, rename,
-unpair, receive, inbox, copy, save, and clear. Each request has an `id` and
+unpair, receive, inbox, copy, save, open, and clear. Each request has an `id` and
 `command`; terminal events use `result` or `error`. Pairing QR events are private
 invitation material. Public device-list events contain only aliases and names.
 
@@ -115,3 +115,13 @@ the private config directory lets ordinary CLI sends delegate to that process;
 both sides verify the peer UID. It is not a network API. Clipboard operations
 remain explicit, saves never overwrite, and EOF or termination cancels work and
 cleans temporary data. Pairing pauses and then restores the receiving listener.
+
+The local UI `open` command takes `transferId` and `itemId`, never a source path.
+It opens a supported attachment with the system viewer using a private preview
+copy selected by content type. Preview copies survive Inbox Clear, are reused
+within the UI session, and expire 24 hours after their most recent Open; cleanup
+runs while the UI is active and at its next startup.
+
+The panel implements Clear/Undo by hiding pending items immediately and delaying
+the `clear` command for eight seconds. Undo cancels that deletion; consecutive
+clears share the window. Pending files continue to count toward receiver limits.

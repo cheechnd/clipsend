@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,6 +28,7 @@ type Incoming struct {
 	Text        string               `json:"text,omitempty"`
 	Attachments []IncomingAttachment `json:"attachments"`
 	ExpiresAt   time.Time            `json:"expiresAt"`
+	ReceivedAt  time.Time            `json:"receivedAt"`
 	dir         string
 	received    map[string]bool
 	complete    bool
@@ -250,6 +252,7 @@ func (b *Inbox) Complete(id string) error {
 	}
 	x.dir = name
 	x.complete = true
+	x.ReceivedAt = time.Now()
 	delete(b.pending, id)
 	x.ExpiresAt = time.Time{}
 	b.items[id] = x
@@ -263,6 +266,12 @@ func (b *Inbox) Items() []*Incoming {
 	for _, x := range b.items {
 		out = append(out, cloneIncoming(x))
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ReceivedAt.Equal(out[j].ReceivedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].ReceivedAt.After(out[j].ReceivedAt)
+	})
 	return out
 }
 func (b *Inbox) Clear(id string) error {

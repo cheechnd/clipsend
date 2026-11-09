@@ -35,6 +35,7 @@ function reduce(state, event) {
   } else if (event.type === "inbox") {
     next.inbox = Array.isArray(event.items) ? event.items : []
   } else if (event.type === "incoming") {
+    next.noticeKind = "info"
     next.notice = "Received from " + String(event.alias || "device")
     next.effects = ["inbox"]
   } else if (event.type === "pairing") {
@@ -53,8 +54,13 @@ function reduce(state, event) {
       next.receiveEndpoint = String(event.endpoint || next.receiveEndpoint || "")
       next.notice = "Receiving is on"
     }
+    if (next.notice !== state.notice) next.noticeKind = "info"
   } else if (event.type === "result") {
     next = settleAction(state, event)
+    if (["send", "receive", "pair", "rename", "unpair", "copy", "save", "open", "clear", "approve"].indexOf(next.action) >= 0) {
+      next.noticeKind = "success"
+      next.noticeAction = next.action
+    }
     if (next.action === "devices") {
       next.devices = Array.isArray(event.devices) ? event.devices : []
       next.selectedAlias = chooseDevice(next)
@@ -82,23 +88,34 @@ function reduce(state, event) {
       next.notice = next.action === "rename" ? "Device renamed" : "Device unpaired"
       if (next.action === "rename") next.effects = ["devices"]
     } else if (next.action === "clear") {
+      next.notice = "Cleared"
       next.effects = ["inbox"]
     } else if (next.action === "copy") {
       next.notice = "Copied"
+    } else if (next.action === "open") {
+      next.notice = "Opened"
     } else if (next.action === "save") {
       next.notice = "Saved"
     } else if (next.action === "approve") {
+      next.notice = ""
       next.approval = null
     }
   } else if (event.type === "error") {
     next = settleAction(state, event)
+    next.noticeKind = "error"
+    next.noticeAction = next.action
     next.notice = String(event.message || event.code || "Action failed")
+    if (event.code === "cancelled") {
+      next.noticeKind = "info"
+      next.notice = next.action === "pair" ? "Pairing cancelled" : "Cancelled"
+    }
     if (event.id === state.activeRequest) {
       next.activeRequest = ""
       next.failedSend = event.code === "cancelled" ? null : state.activePayload
       if (next.failedSend) next.failedSend = Object.assign({}, next.failedSend, { code: String(event.code || "") })
       next.activePayload = null
     }
+    if (next.action === "clear") next.effects = ["inbox"]
     if (next.action === "pair") { next.pairing = null; next.pairRequest = ""; next.pairCancelling = false }
   }
   return next
