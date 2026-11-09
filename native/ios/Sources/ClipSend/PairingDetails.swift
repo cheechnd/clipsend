@@ -2,6 +2,9 @@ import Foundation
 #if canImport(CryptoKit)
 import CryptoKit
 #endif
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 #if canImport(Darwin)
 import Darwin
 #else
@@ -67,8 +70,9 @@ enum TransferValidator {
     struct Key: Hashable { let computerID: String; let transferID: String }
     static func key(computerID: String, transferID: String) -> Key { Key(computerID: computerID, transferID: transferID) }
     static func validate(_ transfer: TransferPayload, computerID: String, now: Date = .now) -> Bool {
-        transfer.version == 1 && transfer.computerID == computerID && !transfer.id.isEmpty &&
-        !transfer.text.isEmpty && transfer.text.utf8.count <= 64_000 &&
+        transfer.version == 1 && transfer.computerID == computerID && transfer.id.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil &&
+        transfer.text.utf8.count <= 64_000 && (!transfer.text.isEmpty || !(transfer.attachments ?? []).isEmpty) &&
+        (transfer.attachments ?? []).count <= 16 && (transfer.attachments ?? []).allSatisfy(AttachmentDescriptor.isValid) &&
         ProtocolDate.parse(transfer.expiresAt).map { $0 > now } == true
     }
 }
@@ -97,11 +101,40 @@ struct PairedComputer: Codable, Identifiable, Equatable {
 struct PairResponse: Decodable { let version: Int; let computerID: String; let computerName: String; let deviceID: String; let secret: String }
 struct TransferList: Decodable { let version: Int; let transfers: [TransferStub] }
 struct TransferStub: Decodable, Identifiable { let id: String; let expiresAt: String }
-struct TransferPayload: Decodable { let version: Int; let id: String; let computerID: String; let senderName: String; let text: String; let expiresAt: String }
+struct TransferPayload: Decodable { let version: Int; let id: String; let computerID: String; let senderName: String; let text: String; let expiresAt: String; let attachments: [AttachmentDescriptor]?; init(version: Int, id: String, computerID: String, senderName: String, text: String, expiresAt: String, attachments: [AttachmentDescriptor]? = nil) { self.version = version; self.id = id; self.computerID = computerID; self.senderName = senderName; self.text = text; self.expiresAt = expiresAt; self.attachments = attachments } }
+
+struct AttachmentDescriptor: Codable, Identifiable, Hashable {
+    let id: String; let name: String; let mime: String; let size: Int64; let sha256: String
+    static func isValid(_ item: AttachmentDescriptor) -> Bool {
+        !item.id.isEmpty && item.id.utf8.count <= 128 && item.id.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil &&
+        !item.name.isEmpty && item.name.utf8.count <= 255 && !item.mime.isEmpty && item.mime.utf8.count <= 127 && item.mime.rangeOfCharacter(from: .controlCharacters) == nil && item.size >= 0 && item.size <= 128 * 1024 * 1024 &&
+        item.sha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+    }
+}
 
 struct ReceivedText: Identifiable, Equatable {
-    let computerID: String; let transferID: String; let senderName: String; let text: String; let receivedAt: Date
+    let computerID: String; let transferID: String; let senderName: String; let text: String; let receivedAt: Date; var attachments: [ReceivedAttachment] = []
     var id: String { computerID + ":" + transferID }
+}
+
+struct ReceivedAttachment: Identifiable, Equatable {
+    let descriptor: AttachmentDescriptor; let fileURL: URL
+    var id: String { descriptor.id }
+}
+
+enum SafeFilename {
+    static func sanitize(_ input: String, fallback: String = "attachment") -> String {
+        let leaf = (input.replacingOccurrences(of: "\\", with: "/") as NSString).lastPathComponent
+        var scalars = String.UnicodeScalarView()
+        for scalar in leaf.unicodeScalars {
+            if CharacterSet.controlCharacters.contains(scalar) || scalar == "/" || scalar == "\\" || scalar == ":" { continue }
+            let candidate = String(scalars) + String(scalar)
+            guard candidate.utf8.count <= 255 else { break }
+            scalars.append(scalar)
+        }
+        let clean = String(scalars).trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty || clean == "." || clean == ".." ? fallback : clean
+    }
 }
 
 enum Fingerprint {
@@ -110,6 +143,21 @@ enum Fingerprint {
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         #else
         return PortableSHA256.hex(data)
+        #endif
+    }
+}
+
+enum FileDigest {
+    static func sha256(_ url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
+        #if canImport(CryptoKit)
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty { hasher.update(data: chunk) }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        #else
+        var data = Data()
+        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty { data.append(chunk) }
+        return Fingerprint.hex(data)
         #endif
     }
 }

@@ -132,7 +132,7 @@ func TestSendAPNsHTTP2PayloadAndHeaders(t *testing.T) {
 		}
 		aps := p["aps"].(map[string]any)
 		alert := aps["alert"].(map[string]any)
-		if alert["title"] != "Text ready" || alert["body"] != "Tap to receive in ClipSend." {
+		if alert["title"] != "ClipSend ready" || alert["body"] != "Tap to receive in ClipSend." {
 			t.Errorf("alert=%v", alert)
 		}
 		meta := p["clipsend"].(map[string]any)

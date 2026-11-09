@@ -31,6 +31,9 @@ import (
 const PairingTTL = 5 * time.Minute
 const TransferTTL = 120 * time.Second
 const MaxTextBytes = 64000
+const MaxItems = 16
+const MaxItemBytes int64 = 128 << 20
+const MaxTransferBytes int64 = 256 << 20
 const maxStoreBytes int64 = 16 << 20
 
 var errClosed = errors.New("direct store closed")

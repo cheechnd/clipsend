@@ -1,6 +1,6 @@
 _clipsend_complete() {
   local current="${COMP_WORDS[COMP_CWORD]}"
-  local words='pair devices unpair rename doctor relay send --help --version'
+  local words='pair devices unpair rename doctor relay send ui --help --version'
   if (( COMP_CWORD == 1 )); then
     COMPREPLY=( $(compgen -W "$words" -- "$current") )
   elif [[ ${COMP_WORDS[1]} == pair ]]; then
@@ -11,4 +11,4 @@ _clipsend_complete() {
     COMPREPLY=()
   fi
 }
-complete -F _clipsend_complete clipsend
+complete -o default -o bashdefault -F _clipsend_complete clipsend

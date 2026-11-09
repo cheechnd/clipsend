@@ -14,6 +14,8 @@
 	<string>ClipSend uses the camera to scan a computer’s pairing QR code.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>ClipSend discovers paired computers on your local network to receive text.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>ClipSend saves an item to Photos only when you choose Save Image from the share sheet.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

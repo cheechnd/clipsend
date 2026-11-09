@@ -1,5 +1,11 @@
 version: 1
 bundleID: dev.cheechnd.clipsend
+product: ClipSend
 infoPath: Info.plist
 entitlementsPath: ClipSend.entitlements
 iconPath: Resources/AppIcon.png
+extensions:
+  - product: ClipSendShare
+    bundleID: dev.cheechnd.clipsend.share
+    infoPath: ShareExtension-Info.plist
+    entitlementsPath: ShareExtension.entitlements

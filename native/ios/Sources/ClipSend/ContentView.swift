@@ -1,5 +1,9 @@
 import SwiftUI
 import UIKit
+import PhotosUI
+import QuickLook
+import UniformTypeIdentifiers
+import ImageIO
 
 struct ContentView: View {
     @ObservedObject var model: CompanionModel
@@ -10,6 +14,16 @@ struct ContentView: View {
     @State private var showingPaste = false
     @State private var deviceName = UIDevice.current.name
     @State private var copiedID: String?
+    @State private var outboundText = ""
+    @State private var outboundFiles: [URL] = []
+    @State private var showingPhotos = false
+    @State private var selectedComputer = ""
+    @State private var showingFiles = false
+    @State private var previewFile: URL?
+    @State private var previewImage: UIImage?
+    @State private var shareItems: [Any] = []
+    @State private var sendExpanded = false
+    @State private var outboundDirectory: URL?
     private var width: CGFloat { 520 }
 
     var body: some View {
@@ -45,6 +59,23 @@ struct ContentView: View {
             .sheet(item: Binding(get: { model.pairInvitation.map(InvitationSheet.init) }, set: { if $0 == nil { model.pairInvitation = nil } })) { item in
                 pairApprovalSheet(item.invitation).presentationDetents([.medium, .large])
             }
+            .fileImporter(isPresented: $showingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+                do { let urls = try result.get(); for url in urls { outboundFiles.append(try stageFile(url)) } }
+                catch { model.errorMessage = error.localizedDescription }
+            }
+            .sheet(isPresented: $showingPhotos) { PhotoLibraryPicker { providers in Task { for provider in providers { do { outboundFiles.append(try await stagePhoto(provider)) } catch { model.errorMessage = error.localizedDescription } } } } }
+            .sheet(isPresented: Binding(get: { !shareItems.isEmpty }, set: { if !$0 { shareItems = [] } })) { ActivityShare(items: shareItems) }
+            .sheet(isPresented: Binding(get: { previewFile != nil }, set: { if !$0 { previewFile = nil } })) {
+                if let previewFile {
+                    NavigationStack {
+                        QuickLookFilePreview(url: previewFile)
+                            .navigationTitle(previewFile.lastPathComponent)
+                            .navigationBarTitleDisplayMode(.inline)
+                            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { self.previewFile = nil } } }
+                    }
+                }
+            }
+            .sheet(isPresented: Binding(get: { previewImage != nil }, set: { if !$0 { previewImage = nil } })) { if let previewImage { NavigationStack { GeometryReader { geometry in Image(uiImage: previewImage).resizable().scaledToFit().frame(width: geometry.size.width, height: geometry.size.height) }.navigationTitle("Image preview").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { self.previewImage = nil } } } } } }
         }
     }
     private var header: some View {
@@ -99,24 +130,135 @@ struct ContentView: View {
                 Text("Your computer offers a test send. Return to the Home Screen, then start the test there to check notification delivery.").font(.subheadline).foregroundStyle(.secondary)
             }
             if !model.alertsEnabled { notificationPrompt }
-            HStack { Text("Received text").font(.headline); Spacer(); Button { for c in model.computers { model.receive(c.computerID) } } label: { Label("Check now", systemImage: "arrow.clockwise").frame(minHeight: 44) }.font(.subheadline) }
-            Text("Text stays on this device until ClipSend closes or you clear it.").font(.footnote).foregroundStyle(.secondary)
+            HStack { Text("Received content").font(.headline); Spacer(); Button { for c in model.computers { model.receive(c.computerID) } } label: { Label("Check now", systemImage: "arrow.clockwise").frame(minHeight: 44) }.font(.subheadline) }
+            if let progress = model.receiveProgress { ProgressView(value: progress); Button("Cancel receive", role: .cancel) { model.cancelReceive() }.font(.footnote) }
+            Text("Received items stay on this device until ClipSend closes or you clear them.").font(.footnote).foregroundStyle(.secondary)
             if model.messages.isEmpty {
-                VStack(spacing: 9) { Image(systemName: "tray").font(.title2).foregroundStyle(.secondary); Text("No text received").font(.subheadline.weight(.medium)); Text("ClipSend checks paired computers while this app is open.").font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center) }.frame(maxWidth: .infinity).padding(.vertical, 30)
+                VStack(spacing: 9) { Image(systemName: "tray").font(.title2).foregroundStyle(.secondary); Text("Nothing received yet").font(.subheadline.weight(.medium)); Text("ClipSend checks paired computers while this app is open.").font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center) }.frame(maxWidth: .infinity).padding(.vertical, 30)
             } else {
                 ForEach(model.messages) { message in
                     VStack(alignment: .leading, spacing: 12) {
                         HStack { VStack(alignment: .leading, spacing: 3) { Text(message.senderName).font(.subheadline.weight(.semibold)); Text(message.receivedAt, style: .time).font(.caption).foregroundStyle(.secondary) }; Spacer(); Button { model.clear(message) } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary).frame(minWidth: 44, minHeight: 44).contentShape(Rectangle()) }.accessibilityLabel("Clear received text") }
-                        ScrollView { Text(message.text).font(.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 2) }.frame(maxHeight: 240)
+                        if !message.text.isEmpty { ScrollView { Text(message.text).font(.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 2) }.frame(maxHeight: 240) }
+                        ForEach(message.attachments) { attachment in
+                            HStack(spacing: 10) {
+                                Image(systemName: attachment.descriptor.mime.hasPrefix("image/") ? "photo" : "doc")
+                                VStack(alignment: .leading) { Text(attachment.descriptor.name).lineLimit(1); Text(ByteCountFormatter.string(fromByteCount: attachment.descriptor.size, countStyle: .file)).font(.caption).foregroundStyle(.secondary) }
+                                Spacer()
+                                Button("Preview") { showPreview(attachment) }.buttonStyle(.bordered)
+                                Menu { Button("Share or Save…", systemImage: "square.and.arrow.up") { shareItems = [attachment.fileURL] }; if attachment.descriptor.mime.hasPrefix("image/") { Button("Copy image", systemImage: "doc.on.doc") { if copyOriginalImage(attachment) { copiedID = message.id } else { model.errorMessage = "This image format can’t be copied safely. Use Share or Save instead." } } } } label: { Image(systemName: "ellipsis.circle").frame(width: 44, height: 44) }.accessibilityLabel("Attachment actions")
+                            }
+                        }
+                        if copiedID == message.id { Label("Copied", systemImage: "checkmark.circle.fill").font(.footnote).foregroundStyle(.green) }
                         HStack(spacing: 10) {
-                            Button { UIPasteboard.general.string = message.text; copiedID = message.id } label: { Label(copiedID == message.id ? "Copied" : "Copy", systemImage: copiedID == message.id ? "checkmark" : "doc.on.doc").frame(maxWidth: .infinity, minHeight: 44) }.buttonStyle(.borderedProminent)
+                            if !message.text.isEmpty { Button { UIPasteboard.general.string = message.text; copiedID = message.id } label: { Label(copiedID == message.id ? "Copied" : "Copy", systemImage: copiedID == message.id ? "checkmark" : "doc.on.doc").frame(maxWidth: .infinity, minHeight: 44) }.buttonStyle(.borderedProminent) }
+                            if !message.attachments.isEmpty { Button { shareItems = message.attachments.map(\.fileURL) } label: { Label("Share / Save", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity, minHeight: 44) }.buttonStyle(.bordered) }
                             if let url = safeLink(message.text) { Link(destination: url) { Label("Open link", systemImage: "arrow.up.right.square").frame(maxWidth: .infinity, minHeight: 44) }.buttonStyle(.bordered) }
                         }
                     }.padding(16).background(.background, in: RoundedRectangle(cornerRadius: 18)).accessibilityElement(children: .contain)
                 }
             }
+            outboundCard
             Button { showScanner = true } label: { Label("Add another computer", systemImage: "plus") }.buttonStyle(.bordered).frame(maxWidth: .infinity)
         }.padding(18).background(.background, in: RoundedRectangle(cornerRadius: 22))
+    }
+    private var outboundCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+          DisclosureGroup(isExpanded: $sendExpanded) {
+            VStack(alignment: .leading, spacing: 12) {
+            Picker("Computer", selection: $selectedComputer) {
+                Text("Choose a computer").tag("")
+                ForEach(model.computers) { Text($0.name).tag($0.computerID) }
+            }.pickerStyle(.menu)
+            TextField("Text to send", text: $outboundText, axis: .vertical).lineLimit(2...5).textFieldStyle(.roundedBorder)
+            if !outboundFiles.isEmpty { ForEach(Array(outboundFiles.enumerated()), id: \.offset) { index, url in HStack { Image(systemName: "paperclip"); Text(url.lastPathComponent).lineLimit(1); Spacer(); Button { removeOutboundFile(at: index) } label: { Image(systemName: "xmark.circle.fill") }.accessibilityLabel("Remove \(url.lastPathComponent)") } } }
+            HStack { Button { showingFiles = true } label: { Label("Files", systemImage: "folder") }.buttonStyle(.bordered); Button { showingPhotos = true } label: { Label("Photos", systemImage: "photo") }.buttonStyle(.bordered); Spacer(); Button("Paste") { if let value = UIPasteboard.general.string { outboundText = value } }.buttonStyle(.bordered) }
+            Button { model.send(text: outboundText, files: outboundFiles, to: selectedComputer) } label: { Label("Send", systemImage: "arrow.up.circle.fill").frame(maxWidth: .infinity, minHeight: 44) }.buttonStyle(.borderedProminent).disabled(selectedComputer.isEmpty || (outboundText.isEmpty && outboundFiles.isEmpty) || model.transferProgress != nil)
+            if let progress = model.transferProgress { ProgressView(value: progress); Button("Cancel transfer", role: .cancel) { model.cancelTransfer() }.buttonStyle(.bordered) }
+            if let status = model.transferStatus { Text(status).font(.footnote).foregroundStyle(.secondary).accessibilityAddTraits(.updatesFrequently) }
+            }
+          } label: { Label("Send to a computer", systemImage: "arrow.up.right.circle").font(.headline) }
+        }.padding(18).background(.background, in: RoundedRectangle(cornerRadius: 22))
+    }
+    private func stageFile(_ source: URL) throws -> URL {
+        let scoped = source.startAccessingSecurityScopedResource(); defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+        guard let size = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize else { throw StagingFailure.unreadable }
+        guard size <= 128 * 1024 * 1024 else { throw StagingFailure.tooLarge }
+        guard outboundFiles.count < 16 else { throw StagingFailure.tooMany }
+        guard outboundByteCount + Int64(size) <= 256 * 1024 * 1024 else { throw StagingFailure.aggregateLimit }
+        let target = stageTarget(named: source.lastPathComponent)
+        do { try FileManager.default.copyItem(at: source, to: target); return target } catch { throw StagingFailure.unreadable }
+    }
+    private func stagePhoto(_ provider: NSItemProvider) async throws -> URL {
+        guard outboundFiles.count < 16 else { throw StagingFailure.tooMany }
+        guard outboundByteCount < 256 * 1024 * 1024 else { throw StagingFailure.aggregateLimit }
+        let remainingBytes = 256 * 1024 * 1024 - outboundByteCount
+        let directory = stageDirectory()
+        let suggestedName = SafeFilename.sanitize(provider.suggestedName ?? "photo")
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+            provider.loadFileRepresentation(forTypeIdentifier: UTType.image.identifier) { url, _ in
+                guard let url, let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize else { continuation.resume(throwing: StagingFailure.unreadable); return }
+                guard size <= 128 * 1024 * 1024 else { continuation.resume(throwing: StagingFailure.tooLarge); return }
+                guard Int64(size) <= remainingBytes else { continuation.resume(throwing: StagingFailure.aggregateLimit); return }
+                let ext = url.pathExtension
+                let name = (URL(fileURLWithPath: suggestedName).pathExtension.isEmpty && !ext.isEmpty) ? suggestedName + "." + ext : suggestedName
+                let target = directory.appendingPathComponent(UUID().uuidString, isDirectory: true).appendingPathComponent(SafeFilename.sanitize(name))
+                try? FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                do { try FileManager.default.copyItem(at: url, to: target); continuation.resume(returning: target) }
+                catch { continuation.resume(throwing: StagingFailure.unreadable) }
+            }
+        }
+    }
+    private var outboundByteCount: Int64 { outboundFiles.reduce(0) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) } }
+    private func stageDirectory() -> URL {
+        if let outboundDirectory { return outboundDirectory }
+        let temp = FileManager.default.temporaryDirectory
+        if let old = try? FileManager.default.contentsOfDirectory(at: temp, includingPropertiesForKeys: nil) { old.filter { $0.lastPathComponent.hasPrefix("ClipSend-Outbox-") }.forEach { try? FileManager.default.removeItem(at: $0) } }
+        let dir = temp.appendingPathComponent("ClipSend-Outbox-" + UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]); outboundDirectory = dir; return dir
+    }
+    private func stageTarget(named name: String) -> URL {
+        let dir = stageDirectory().appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        return dir.appendingPathComponent(SafeFilename.sanitize(name))
+    }
+    private func removeOutboundFile(at index: Int) {
+        let url = outboundFiles.remove(at: index)
+        if let outboundDirectory, url.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL == outboundDirectory.standardizedFileURL { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        else { try? FileManager.default.removeItem(at: url) }
+    }
+    private func imageType(for mime: String) -> UTType? {
+        switch mime.lowercased() { case "image/png": .png; case "image/jpeg", "image/jpg": .jpeg; case "image/heic": .heic; default: nil }
+    }
+    private func safeImage(_ url: URL, mime: String) -> UIImage? {
+        guard let expectedType = imageType(for: mime), let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let sourceType = CGImageSourceGetType(source) as String?, sourceType == expectedType.identifier,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int, let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0, let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: 2048] as CFDictionary) else { return nil }
+        return UIImage(cgImage: image)
+    }
+    private func copyOriginalImage(_ attachment: ReceivedAttachment) -> Bool {
+        guard let type = imageType(for: attachment.descriptor.mime), safeImage(attachment.fileURL, mime: attachment.descriptor.mime) != nil,
+              let values = try? attachment.fileURL.resourceValues(forKeys: [.fileSizeKey]), let size = values.fileSize,
+              size <= 128 * 1024 * 1024, let data = try? Data(contentsOf: attachment.fileURL, options: [.mappedIfSafe]), data.count == size else { return false }
+        UIPasteboard.general.setData(data, forPasteboardType: type.identifier)
+        return true
+    }
+    private func showPreview(_ attachment: ReceivedAttachment) {
+        if attachment.descriptor.mime.hasPrefix("image/"), let image = safeImage(attachment.fileURL, mime: attachment.descriptor.mime) { previewImage = image }
+        else { previewFile = attachment.fileURL }
+    }
+    private enum StagingFailure: LocalizedError {
+        case tooLarge, tooMany, aggregateLimit, unreadable
+        var errorDescription: String? {
+            switch self {
+            case .tooLarge: "A file exceeds the 128 MiB per item limit."
+            case .tooMany: "Choose no more than 16 files."
+            case .aggregateLimit: "The selected files exceed the 256 MiB total limit."
+            case .unreadable: "ClipSend couldn’t read that item. Try selecting it again."
+            }
+        }
     }
     private var settingsView: some View {
         NavigationStack { List {
@@ -172,6 +314,40 @@ struct ContentView: View {
 }
 
 private struct InvitationSheet: Identifiable { let invitation: PairingInvitation; var id: String { invitation.computerID } }
+
+private struct ActivityShare: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: items, applicationActivities: nil) }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) { }
+}
+
+private struct PhotoLibraryPicker: UIViewControllerRepresentable {
+    let selected: ([NSItemProvider]) -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(selected: selected) }
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration(photoLibrary: .shared()); config.filter = .images; config.selectionLimit = 16
+        let picker = PHPickerViewController(configuration: config); picker.delegate = context.coordinator; return picker
+    }
+    func updateUIViewController(_ picker: PHPickerViewController, context: Context) { }
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let selected: ([NSItemProvider]) -> Void
+        init(selected: @escaping ([NSItemProvider]) -> Void) { self.selected = selected }
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) { picker.dismiss(animated: true); selected(results.map(\.itemProvider)) }
+    }
+}
+
+private struct QuickLookFilePreview: UIViewControllerRepresentable {
+    let url: URL
+    func makeCoordinator() -> Coordinator { Coordinator(url: url) }
+    func makeUIViewController(context: Context) -> QLPreviewController { let controller = QLPreviewController(); controller.dataSource = context.coordinator; return controller }
+    func updateUIViewController(_ controller: QLPreviewController, context: Context) { context.coordinator.url = url; controller.reloadData() }
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        var url: URL
+        init(url: URL) { self.url = url }
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem { url as NSURL }
+    }
+}
 
 private struct ComputerSettings: View {
     let computer: PairedComputer; @ObservedObject var model: CompanionModel; @Environment(\.dismiss) private var dismiss; @State private var name = ""

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "clipsend.omarchy",
+  "name": "ClipSend",
+  "version": "0.1.0",
+  "author": "ClipSend",
+  "license": "MIT",
+  "description": "Send and receive text and files with paired devices.",
+  "kinds": ["service", "bar-widget"],
+  "activation": "on-demand",
+  "keepLoaded": true,
+  "entryPoints": { "service": "Service.qml", "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "ClipSend",
+    "description": "Send and receive with paired devices",
+    "category": "Utilities",
+    "aliases": ["clipsend", "clip-send"],
+    "allowMultiple": false,
+    "defaults": { "executable": "clipsend" },
+    "schema": [
+      {
+        "key": "executable",
+        "type": "string",
+        "label": "ClipSend executable",
+        "defaultValue": "clipsend",
+        "description": "Executable name or absolute path. Set this to a candidate build while testing."
+      }
+    ]
+  }
+}

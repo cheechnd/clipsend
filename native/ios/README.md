@@ -1,17 +1,28 @@
 # ClipSend for iPhone and iPad
 
-Native SwiftUI receiver for ClipSend protocol v1. The app scans or accepts a pasted
+Native SwiftUI companion for ClipSend protocol v1. The app scans or accepts a pasted
 computer pairing QR payload, requests pairing over HTTPS with a per-computer leaf
 certificate pin, and waits up to two minutes for approval on the computer. Pairing
 credentials are stored in Keychain under the installed app identifier.
 
 While ClipSend is open, it browses Bonjour `_clipsend._tcp.` services for paired
 computer IDs. It authenticates each candidate with the stored bearer secret and
-certificate pin, validates the transfer and expiration, keeps the text in memory,
-then sends the acknowledgment. The in-memory inbox is limited to 32 items. Copy,
-Open link, and Clear are explicit actions. No clipboard write or automatic external
-app handoff occurs. A valid APNs tap or foreground alert uses only its validated
-computer and transfer metadata to fetch text inside ClipSend.
+certificate pin, validates the transfer and expiration, and acknowledges only
+after attachment bytes have streamed into private temporary files and passed
+declared-size and SHA-256 checks. Text and files remain ephemeral; the inbox is
+limited to 32 items and 256 MiB of files. Copy, Preview, Share/Save, and Clear are
+explicit actions. Image previews are downsampled; Copy image preserves original
+PNG, JPEG, or HEIC bytes after bounded ImageIO validation. A valid APNs tap or
+foreground alert uses only its validated computer and transfer metadata.
+
+The in-app send composer accepts explicit text, Files, and Photos selections and
+sends only to a paired computer advertising `receive=1`. The native Share
+extension accepts text, URLs, images, and files, then uses the same pinned HTTPS
+upload protocol. Its bundle ID is `dev.cheechnd.clipsend.share`; it queries the
+root app’s existing Keychain service/access group with a temporary disposable
+Keychain probe. It never moves or rewrites saved pairings. The device build
+verifies separate host/extension identities and grants both the host's existing
+pairing group, preserving installed pairings.
 
 Computer aliases and pairings can be renamed or forgotten in Settings. Notification
 permission is requested only after an explicit user action. Camera and local network
@@ -32,11 +43,14 @@ xtool dev build > .local/build.log 2>&1
 bash scripts/check.sh
 ```
 
-`xtool dev build` creates the local unsigned build artifact. It does not install
-the app. `scripts/check.sh` runs host-portable protocol tests for whole-second and
+`xtool dev build` packages the app and Share extension without provisioning or
+device installation. xtool 1.22.2 applies ad-hoc signing whenever configured
+products declare entitlements; extension entitlement mapping is limited by the
+current signer implementation, so inspect command output and packaged host and
+extension entitlements before signing for a device. `scripts/check.sh` runs host-portable protocol tests for whole-second and
 fractional RFC3339 timestamps, private HTTPS endpoint validation, invitation
-expiry, transfer size/identity/expiry, and deduplication keys, plus the existing
-build-configuration self-check.
+expiry, text and attachment validation, filename safety, deduplication keys, plus
+the existing build-configuration self-check.
 
 ## Install on a device
 
@@ -45,8 +59,23 @@ xtool signing access, and an app identifier with Push Notifications enabled. Wit
 the intended device connected over USB, unlocked, and trusted, run from this directory:
 
 ```sh
-xtool dev run --usb
+bash scripts/build-device.sh
+pymobiledevice3 apps install --developer xtool/ClipSend.app
 ```
+
+The build script provisions with xtool, then corrects xtool 1.22.2's single-bundle
+entitlement handling using a pinned zsign source revision and a small signing
+helper. It checks the resulting entitlements before returning. The first run
+needs Git, Make, G++, OpenSSL development headers, and Python 3, and builds the
+helper under `$XDG_CACHE_HOME/clipsend-build`. These are build tools, not mobile or
+desktop runtime dependencies. Install `pymobiledevice3` as a shared CLI with
+`uv tool install pymobiledevice3` if needed. Use the intended connected USB device;
+disconnect other devices if selection is ambiguous.
+
+Do not use `xtool dev run` for this extension build: it signs again and overwrites
+the corrected extension identity. The installation command above uses the already
+signed app without modifying it. Existing xtool credentials are reused locally;
+temporary key copies have private permissions and are deleted after signing.
 
 Open ClipSend manually after installation and follow setup. Configure desktop
 notifications using the [root README](../../README.md#notifications), then pair.

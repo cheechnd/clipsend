@@ -21,12 +21,17 @@ import Foundation
         do { _ = try PairingInvitation.parse(String(repeating: "x", count: 4097)); preconditionFailure("Oversized QR accepted") } catch { }
         let transfer = TransferPayload(version: 1, id: "t-1", computerID: "desk-1", senderName: "Workstation", text: "hello", expiresAt: fractional)
         precondition(TransferValidator.validate(transfer, computerID: "desk-1", now: ProtocolDate.parse("2026-11-09T03:00:00Z")!))
+        let attachment = AttachmentDescriptor(id: "item_1", name: "../photo.png", mime: "image/png", size: 3, sha256: Fingerprint.hex(Data("abc".utf8)))
+        let fileTransfer = TransferPayload(version: 1, id: "t-file", computerID: "desk-1", senderName: "Workstation", text: "", expiresAt: fractional, attachments: [attachment])
+        precondition(TransferValidator.validate(fileTransfer, computerID: "desk-1", now: ProtocolDate.parse("2026-11-09T03:00:00Z")!), "Attachment-only transfer rejected")
+        precondition(SafeFilename.sanitize("../../photo.png") == "photo.png", "Filename traversal was retained")
+        precondition(!AttachmentDescriptor.isValid(AttachmentDescriptor(id: "../escape", name: "file", mime: "application/octet-stream", size: 1, sha256: attachment.sha256)), "Unsafe item ID accepted")
         precondition(!TransferValidator.validate(transfer, computerID: "other", now: .now), "Cross-computer transfer accepted")
         let expired = TransferPayload(version: 1, id: "t-2", computerID: "desk-1", senderName: "Workstation", text: "hello", expiresAt: whole)
         precondition(!TransferValidator.validate(expired, computerID: "desk-1", now: ProtocolDate.parse("2026-11-09T03:15:41Z")!))
         let oversized = TransferPayload(version: 1, id: "t-3", computerID: "desk-1", senderName: "Workstation", text: String(repeating: "x", count: 64_001), expiresAt: fractional)
         precondition(!TransferValidator.validate(oversized, computerID: "desk-1", now: .now))
         precondition(TransferValidator.key(computerID: "a:b", transferID: "c") != TransferValidator.key(computerID: "a", transferID: "b:c"))
-        print("Protocol date, private endpoint, invitation expiry, transfer validation, and dedup checks passed.")
+        print("Protocol date, private endpoint, invitation expiry, text and attachment validation, filename safety, and dedup checks passed.")
     }
 }

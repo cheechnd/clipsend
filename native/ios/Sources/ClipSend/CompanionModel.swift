@@ -1,13 +1,29 @@
+import ClipSendCore
 import Foundation
 import SwiftUI
 import UIKit
 import UserNotifications
 import Security
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 
 @MainActor final class CompanionModel: ObservableObject {
     static let shared = CompanionModel()
     @Published private(set) var computers: [PairedComputer] = []
     @Published private(set) var messages: [ReceivedText] = []
+    @Published var transferProgress: Double?
+    @Published var transferStatus: String?
+    @Published var receiveProgress: Double?
+    private var transferTask: Task<Void, Never>?
+    private lazy var inboxDirectory: URL = {
+        if let entries = try? FileManager.default.contentsOfDirectory(at: FileManager.default.temporaryDirectory, includingPropertiesForKeys: nil) {
+            for entry in entries where entry.lastPathComponent.hasPrefix("ClipSend-Inbox-") { try? FileManager.default.removeItem(at: entry) }
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ClipSend-Inbox-" + UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        return root
+    }()
     @Published var status = "Pair a computer to receive text."
     @Published var pairInvitation: PairingInvitation?
     @Published var pairing = false
@@ -45,7 +61,7 @@ import Security
     private var seen: [TransferValidator.Key: Date] = [:]
     private struct ReceiveJob: Hashable { let computerID: String; let transferID: String?; let endpoints: [String] }
     private var receiveQueue: [ReceiveJob] = []
-    private struct DiscoveredSession { let url: URL; let expiresAt: Date }
+    private struct DiscoveredSession { let url: URL; let expiresAt: Date; let receiveEnabled: Bool }
     private var discoveredEndpoints: [String: [String: DiscoveredSession]] = [:]
     private var receiveTask: Task<Void, Never>?
     private var tokenHex: String? { token?.map { String(format: "%02x", $0) }.joined() }
@@ -135,7 +151,71 @@ import Security
         guard store.save(updated) else { status = "Couldn’t remove this computer from Keychain."; return false }
         computers = updated; if computers.isEmpty { status = "Pair a computer to receive text." }; return true
     }
-    func clear(_ message: ReceivedText) { messages.removeAll { $0.id == message.id } }
+    func clear(_ message: ReceivedText) { messages.removeAll { $0.id == message.id }; message.attachments.forEach { try? FileManager.default.removeItem(at: $0.fileURL.deletingLastPathComponent()) } }
+    func cancelTransfer() { transferTask?.cancel(); transferStatus = "Cancelling transfer…" }
+    func cancelReceive() { receiveTask?.cancel(); receiveProgress = nil; status = "Receive cancelled. Tap Check now to retry." }
+    func send(text: String, files: [URL], to computerID: String) {
+        guard transferTask == nil, let computer = computers.first(where: { $0.computerID == computerID }) else { return }
+        transferProgress = 0; transferStatus = "Preparing send…"
+        transferTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.transferTask = nil; self.transferProgress = nil }
+            do { try await self.sendTo(computer, text: text, files: files); self.transferStatus = "Received by \(computer.name)." }
+            catch is CancellationError { self.transferStatus = "Transfer cancelled. You can retry when the computer is available." }
+            catch { self.transferStatus = "Couldn’t send. \(error.localizedDescription)" }
+        }
+    }
+    private func sendTo(_ computer: PairedComputer, text: String, files: [URL]) async throws {
+        let candidates = discoveredEndpoints[computer.computerID, default: [:]].values.filter(\.receiveEnabled)
+        guard let endpoint = candidates.first?.url else { throw ReceiverError.noReceiveEndpoint }
+        guard text.utf8.count <= 64_000, files.count <= 16, !text.isEmpty || !files.isEmpty else { throw ReceiverError.invalidResponse }
+        struct Item: Encodable { let id, name, mime: String; let size: Int64; let sha256: String }
+        struct Create: Encodable { let version: Int; let text: String; let attachments: [Item] }
+        struct Created: Decodable { let id: String }
+        let prepared = try files.map { url -> (Item, URL) in
+            let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentTypeKey])
+            guard let size = values.fileSize, size <= 128 * 1024 * 1024 else { throw ReceiverError.invalidResponse }
+            let name = url.lastPathComponent
+            let mime = values.contentType?.preferredMIMEType ?? "application/octet-stream"
+            return (Item(id: UUID().uuidString.replacingOccurrences(of: "-", with: ""), name: name, mime: mime, size: Int64(size), sha256: try FileDigest.sha256(url)), url)
+        }
+        let totalBytes = prepared.reduce(Int64(0), { $0 + $1.0.size })
+        guard totalBytes <= 256 * 1024 * 1024 else { throw ReceiverError.invalidResponse }
+        let client = PinnedClient(fingerprint: computer.certificateSHA256); defer { client.close() }
+        var request = URLRequest(url: endpoint.appendingPathComponent("v1/incoming"), timeoutInterval: 30)
+        request.httpMethod = "POST"; request.setValue("Bearer \(computer.secret)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(Create(version: 1, text: text, attachments: prepared.map(\.0)))
+        transferStatus = "Connecting to \(computer.name)…"
+        let (data, response) = try await readResponse(request, client: client, limit: 16 * 1024)
+        guard response.statusCode == 201 else { throw ReceiverError.http(response.statusCode) }
+        let created = try JSONDecoder().decode(Created.self, from: data)
+        guard safeProtocolID(created.id) else { throw ReceiverError.invalidResponse }
+        do {
+            for (index, entry) in prepared.enumerated() {
+                try Task.checkCancellation()
+                transferStatus = "Sending file \(index + 1) of \(prepared.count)…"
+                let offset = prepared.prefix(index).reduce(Int64(0)) { $0 + $1.0.size }
+                client.uploadProgress = { [weak self] sent, _ in
+                    Task { @MainActor in self?.transferProgress = totalBytes == 0 ? 0 : min(1, Double(offset + sent) / Double(totalBytes)) }
+                }
+                var upload = URLRequest(url: endpoint.appendingPathComponent("v1/incoming/\(created.id)/items/\(entry.0.id)"), timeoutInterval: 120)
+                upload.httpMethod = "PUT"; upload.setValue("Bearer \(computer.secret)", forHTTPHeaderField: "Authorization"); upload.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+                let (_, reply) = try await client.session.upload(for: upload, fromFile: entry.1, delegate: client)
+                guard (reply as? HTTPURLResponse)?.statusCode == 204 else { throw ReceiverError.invalidResponse }
+                transferProgress = Double(index + 1) / Double(max(1, prepared.count))
+            }
+            try Task.checkCancellation()
+            var complete = URLRequest(url: endpoint.appendingPathComponent("v1/incoming/\(created.id)/complete"), timeoutInterval: 30)
+            complete.httpMethod = "POST"; complete.setValue("Bearer \(computer.secret)", forHTTPHeaderField: "Authorization")
+            let (_, done) = try await readResponse(complete, client: client, limit: 0)
+            guard done.statusCode == 204 else { throw ReceiverError.invalidResponse }
+        } catch {
+            var cancel = URLRequest(url: endpoint.appendingPathComponent("v1/incoming/\(created.id)"), timeoutInterval: 10); cancel.httpMethod = "DELETE"; cancel.setValue("Bearer \(computer.secret)", forHTTPHeaderField: "Authorization")
+            _ = try? await readResponse(cancel, client: client, limit: 0)
+            throw error
+        }
+    }
+    private func safeProtocolID(_ value: String) -> Bool { !value.isEmpty && value.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil }
     func notificationReceived(_ metadata: PushMetadata) { receive(metadata.computerID, transferID: metadata.transferID, endpoints: metadata.endpoints) }
     func receive(_ computerID: String, transferID: String? = nil, endpoints: [String]? = nil) {
         let job = ReceiveJob(computerID: computerID, transferID: transferID, endpoints: endpoints ?? [])
@@ -153,7 +233,8 @@ import Security
         guard active, receiveTask == nil, !receiveQueue.isEmpty else { return }
         let job = receiveQueue.removeFirst()
         guard let computer = computers.first(where: { $0.computerID == job.computerID }) else { status = "This send came from an unknown computer. Pair it in Settings."; drainReceives(); return }
-        receiveTask = Task { await receiveFrom(computer, transferID: job.transferID, endpoints: job.endpoints); receiveTask = nil; drainReceives() }
+        receiveProgress = nil
+        receiveTask = Task { await receiveFrom(computer, transferID: job.transferID, endpoints: job.endpoints); receiveTask = nil; receiveProgress = nil; drainReceives() }
     }
     private func receiveFrom(_ computer: PairedComputer, transferID: String? = nil, endpoints: [String]? = nil) async {
         let client = PinnedClient(fingerprint: computer.certificateSHA256)
@@ -176,15 +257,17 @@ import Security
                     await refreshToken(for: computer, endpoint: base, client: client)
                     let candidates = transferID.flatMap { id in list.transfers.filter { $0.id == id } } ?? list.transfers
                     for item in candidates {
+                        guard safeProtocolID(item.id) else { continue }
                         fetchingTransfer = true
                         let payloadData = try await get(base.appendingPathComponent("v1/transfers/\(item.id)"), client: client, secret: computer.secret)
-                        let payload = try JSONDecoder().decode(TransferPayload.self, from: payloadData)
+                    let payload = try JSONDecoder().decode(TransferPayload.self, from: payloadData)
                         guard payload.id == item.id, TransferValidator.validate(payload, computerID: computer.computerID) else { throw ReceiverError.invalidResponse }
                         let key = TransferValidator.key(computerID: computer.computerID, transferID: payload.id)
                         if seen[key] == nil {
                             guard messages.count < 32 else { status = "The inbox is full. Clear a received item before receiving another send."; continue }
                             justPaired = false
-                            messages.insert(ReceivedText(computerID: computer.computerID, transferID: payload.id, senderName: payload.senderName, text: payload.text, receivedAt: .now), at: 0)
+                            let storedAttachments = try await downloadAttachments(payload.attachments ?? [], transferID: payload.id, endpoint: base, client: client, secret: computer.secret)
+                            messages.insert(ReceivedText(computerID: computer.computerID, transferID: payload.id, senderName: payload.senderName, text: payload.text, receivedAt: .now, attachments: storedAttachments), at: 0)
                             seen[key] = ProtocolDate.parse(payload.expiresAt)
                         }
                         var ack = URLRequest(url: base.appendingPathComponent("v1/transfers/\(item.id)/ack")); ack.httpMethod = "POST"
@@ -193,14 +276,56 @@ import Security
                         guard ackResponse.statusCode == 204 else { status = "Text is safe in ClipSend, but the computer hasn’t confirmed receipt yet."; continue }
                         completedTransfer = true
                         fetchingTransfer = false
-                        status = "Received text from \(payload.senderName)."
+                        status = payload.text.isEmpty ? "Received files from \(payload.senderName)." : "Received text from \(payload.senderName)."
                     }
-            } catch { if fetchingTransfer { latestError = error }; continue }
+            } catch { if Task.isCancelled { latestError = CancellationError(); break }; if fetchingTransfer { latestError = error }; continue }
         }
         if let latestError { status = recoveryMessage(latestError) }
         else if !completedTransfer {
             status = transferID == nil ? "No active sends from \(computer.name). Try again when it’s online." : "That send is no longer available. Ask the computer to send it again."
         }
+    }
+    private func downloadAttachments(_ descriptors: [AttachmentDescriptor], transferID: String, endpoint: URL, client: PinnedClient, secret: String) async throws -> [ReceivedAttachment] {
+        let currentBytes = messages.flatMap(\.attachments).reduce(Int64(0)) { $0 + $1.descriptor.size }
+        let incomingBytes = descriptors.reduce(Int64(0)) { $0 + $1.size }
+        guard descriptors.count <= 16, descriptors.allSatisfy(AttachmentDescriptor.isValid), incomingBytes <= 256 * 1024 * 1024, currentBytes + incomingBytes <= 256 * 1024 * 1024 else { throw ReceiverError.inboxLimit }
+        var files: [ReceivedAttachment] = []
+        receiveProgress = incomingBytes == 0 ? nil : 0
+        do {
+            for descriptor in descriptors {
+                try Task.checkCancellation()
+                guard safeProtocolID(transferID) else { throw ReceiverError.invalidResponse }
+                var request = URLRequest(url: endpoint.appendingPathComponent("v1/transfers/\(transferID)/items/\(descriptor.id)"), timeoutInterval: 120)
+                request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+                let (stream, response) = try await client.session.bytes(for: request, delegate: client)
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      http.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init).map({ $0 == descriptor.size }) ?? true else { stream.task.cancel(); throw ReceiverError.invalidResponse }
+                let privateItemDir = inboxDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(at: privateItemDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                let destination = privateItemDir.appendingPathComponent(SafeFilename.sanitize(descriptor.name))
+                guard FileManager.default.createFile(atPath: destination.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { stream.task.cancel(); try? FileManager.default.removeItem(at: privateItemDir); throw ReceiverError.storage }
+                let handle: FileHandle
+                do { handle = try FileHandle(forWritingTo: destination) } catch { try? FileManager.default.removeItem(at: privateItemDir); throw error }
+                defer { try? handle.close() }
+                var hash = SHA256(); var buffer = Data(); buffer.reserveCapacity(64 * 1024); var count: Int64 = 0
+                do {
+                    try await withTaskCancellationHandler {
+                      for try await byte in stream {
+                        try Task.checkCancellation(); count += 1
+                        guard count <= descriptor.size else { stream.task.cancel(); throw ReceiverError.invalidResponse }
+                        buffer.append(byte)
+                        if buffer.count >= 64 * 1024 { hash.update(data: buffer); try handle.write(contentsOf: buffer); buffer.removeAll(keepingCapacity: true); receiveProgress = incomingBytes == 0 ? nil : min(1, Double(files.reduce(Int64(0), { $0 + $1.descriptor.size }) + count) / Double(incomingBytes)) }
+                      }
+                    } onCancel: { stream.task.cancel() }
+                    if !buffer.isEmpty { hash.update(data: buffer); try handle.write(contentsOf: buffer) }
+                    try handle.close()
+                } catch { stream.task.cancel(); try? FileManager.default.removeItem(at: privateItemDir); throw error }
+                let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
+                guard count == descriptor.size, digest == descriptor.sha256 else { try? FileManager.default.removeItem(at: privateItemDir); throw ReceiverError.invalidResponse }
+                files.append(ReceivedAttachment(descriptor: descriptor, fileURL: destination))
+            }
+            return files
+        } catch { files.forEach { try? FileManager.default.removeItem(at: $0.fileURL.deletingLastPathComponent()) }; throw error }
     }
     private func get(_ url: URL, client: PinnedClient, secret: String) async throws -> Data {
         var request = URLRequest(url: url, timeoutInterval: 12); request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
@@ -244,11 +369,11 @@ import Security
     }
     private func startDiscovery() {
         guard active, !computers.isEmpty, !isDiscovering else { return }
-        browser = ComputerBrowser(found: { [weak self] id, service, host, port in
+        browser = ComputerBrowser(found: { [weak self] id, service, host, port, receiveEnabled in
             Task { @MainActor in
                 guard let self, self.computers.contains(where: { $0.computerID == id }), let host,
                       let url = URL(string: "https://\(host.contains(":") ? "[\(host)]" : host):\(port)"), ProtocolEndpoint.isAllowed(url) else { return }
-                self.rememberEndpoint(url, for: id, service: service)
+                self.rememberEndpoint(url, for: id, service: service, receiveEnabled: receiveEnabled)
                 self.receive(id, endpoints: self.discoveredEndpoints[id]?.values.map { $0.url.absoluteString })
             }
         }, removed: { [weak self] id, service in
@@ -257,22 +382,24 @@ import Security
         browser?.start(); isDiscovering = true
 
     }
-    private func rememberEndpoint(_ endpoint: URL, for id: String, service: String) {
+    private func rememberEndpoint(_ endpoint: URL, for id: String, service: String, receiveEnabled: Bool) {
         pruneExpiredSessions()
-        discoveredEndpoints[id, default: [:]][service] = DiscoveredSession(url: endpoint, expiresAt: .now.addingTimeInterval(120))
+        discoveredEndpoints[id, default: [:]][service] = DiscoveredSession(url: endpoint, expiresAt: .now.addingTimeInterval(120), receiveEnabled: receiveEnabled)
         while discoveredEndpoints[id, default: [:]].count > 8, let oldest = discoveredEndpoints[id]?.min(by: { $0.value.expiresAt < $1.value.expiresAt })?.key { discoveredEndpoints[id]?.removeValue(forKey: oldest) }
     }
     private func removeDiscoveredService(_ service: String, computerID: String) { discoveredEndpoints[computerID]?.removeValue(forKey: service) }
     private func pruneExpiredSessions() { for id in discoveredEndpoints.keys { discoveredEndpoints[id] = discoveredEndpoints[id]?.filter { $0.value.expiresAt > .now } } }
     private func stopDiscovery() { browser?.stop(); browser = nil; isDiscovering = false }
     private func recoveryMessage(_ error: Error) -> String {
+        if error is CancellationError { return "Receive cancelled. Tap Check now to retry." }
         if let e = error as? ReceiverError, case .http(410) = e { return "That send expired. Ask the computer to send it again." }
         if let e = error as? ReceiverError, case .http(401) = e { return "This computer no longer recognizes this pairing. Forget it and pair again." }
+        if let e = error as? ReceiverError, case .inboxLimit = e { return e.localizedDescription }
         return "Couldn’t receive the send. Check that the computer is online, then try again."
     }
     private struct TokenBody: Encodable { let deviceToken: String; let bundleID: String; let environment: APNSEnvironment }
     private enum ReceiverError: LocalizedError {
-        case http(Int), invalidResponse, storage
+        case http(Int), invalidResponse, storage, noReceiveEndpoint, inboxLimit
         var errorDescription: String? {
             switch self {
             case .http(401), .http(403): "The computer denied this request. Check its pairing approval and try again."
@@ -280,6 +407,8 @@ import Security
             case .http: "The computer returned an unexpected response. Check that it is online and try again."
             case .invalidResponse: "The computer returned data that ClipSend couldn’t safely use."
             case .storage: "ClipSend couldn’t save this pairing in Keychain. No pairing was changed."
+            case .noReceiveEndpoint: "This computer is paired but has not enabled receiving. Turn on Receive on the computer and try again."
+            case .inboxLimit: "The temporary attachment inbox is full. Clear some received files, then retry."
             }
         }
     }
@@ -307,6 +436,7 @@ private final class SecureStore {
 
 private final class PinnedClient: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     let fingerprint: String; private(set) var session: URLSession!
+    var uploadProgress: (@Sendable (Int64, Int64) -> Void)?
     init(fingerprint: String) { self.fingerprint = fingerprint; super.init(); session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil) }
     func close() { session.finishTasksAndInvalidate(); session = nil }
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
@@ -327,30 +457,5 @@ private final class PinnedClient: NSObject, URLSessionDelegate, URLSessionTaskDe
         urlSession(session, didReceive: challenge, completionHandler: completionHandler)
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
-}
-
-private final class ComputerBrowser: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
-    private let browser = NetServiceBrowser(); private var services: [NetService] = []
-    private let found: (String, String, String?, Int) -> Void; private let removed: (String, String) -> Void
-    private var serviceIDs: [String: String] = [:]
-    init(found: @escaping (String, String, String?, Int) -> Void, removed: @escaping (String, String) -> Void) { self.found = found; self.removed = removed; super.init(); browser.delegate = self }
-    func start() { browser.searchForServices(ofType: "_clipsend._tcp.", inDomain: "local.") }
-    func stop() { browser.stop(); services.forEach { $0.stop() } }
-    func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) { service.delegate = self; services.append(service); service.resolve(withTimeout: 8) }
-    func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
-        if let id = serviceIDs.removeValue(forKey: service.name) { removed(id, service.name) }
-        services.removeAll { $0.name == service.name }
-    }
-    func netServiceDidResolveAddress(_ sender: NetService) {
-        let attrs = sender.addresses?.compactMap { address -> String? in
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST)); let ok = address.withUnsafeBytes { raw in getnameinfo(raw.baseAddress!.assumingMemoryBound(to: sockaddr.self), socklen_t(address.count), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 }; guard ok, let zero = host.firstIndex(of: 0) else { return nil }; return String(decoding: host[..<zero].map { UInt8(bitPattern: $0) }, as: UTF8.self)
-        } ?? []
-        guard let txt = sender.txtRecordData().map(NetService.dictionary(fromTXTRecord:)),
-              let version = txt["v"].flatMap({ String(data: $0, encoding: .utf8) }), version == "1",
-              let id = txt["computerID"].flatMap({ String(data: $0, encoding: .utf8) }) else { return }
-        let host = attrs.first { value in URL(string: "https://\(value.contains(":") ? "[\(value)]" : value):\(sender.port)").map(ProtocolEndpoint.isAllowed) == true }
-        guard let host else { return }
-        serviceIDs[sender.name] = id
-        found(id, sender.name, host, sender.port)
-    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) { uploadProgress?(totalBytesSent, totalBytesExpectedToSend) }
 }

@@ -28,17 +28,18 @@ var version = "dev"
 
 const defaultPort = 53318
 
-const usage = `ClipSend — send text directly to your paired iPhone or iPad.
+const usage = `ClipSend — send text, images, and files to your paired iPhone or iPad.
 
 Usage:
-  clipsend <alias> [--host IP] [--port PORT] [--stdin]
-  clipsend send <alias> [--host IP] [--port PORT] [--stdin]
+  clipsend <alias> [--host IP] [--port PORT] [--stdin] [FILE ...]
+  clipsend send <alias> [--host IP] [--port PORT] [--stdin] [FILE ...]
   clipsend pair <alias> [--host IP] [--port PORT] [--qr PATH]
   clipsend devices
   clipsend rename <alias> <new-alias>
   clipsend unpair <alias>
   clipsend relay <private-config.json>
   clipsend doctor
+  clipsend ui
   clipsend --version
 
 Scan the pairing QR code in the ClipSend mobile app, then approve the device here.
@@ -92,6 +93,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return nil
 	}
 	command := args[0]
+	if command == "ui" {
+		return uiCommand(ctx, args[1:], in, out, errOut)
+	}
 	if command == "send" {
 		args = args[1:]
 		if len(args) == 0 {
@@ -329,20 +333,55 @@ func sendCommand(ctx context.Context, dir string, args []string, in io.Reader, o
 	if *listenPort < 1 || *listenPort > 65535 {
 		return errors.New("port must be between 1 and 65535")
 	}
-	if fs.NArg() != 0 {
-		return errors.New("unexpected send arguments")
+	files := append([]string(nil), fs.Args()...)
+	for i, p := range files {
+		absolute, err := filepath.Abs(p)
+		if err != nil {
+			return fmt.Errorf("resolve attachment path: %w", err)
+		}
+		files[i] = absolute
 	}
-	var text string
-	var err error
+	if *stdin && len(files) > 0 {
+		return errors.New("--stdin cannot be combined with attachment paths")
+	}
+	var stdinText string
 	if *stdin {
 		b, e := io.ReadAll(io.LimitReader(in, 64001))
 		if e != nil {
 			return e
 		}
-		text = string(b)
+		if len(b) > 64000 {
+			return errors.New("stdin exceeds 64,000 bytes")
+		}
+		stdinText = string(b)
+		used, e := sendViaUI(ctx, dir, uiRequest{ID: fmt.Sprintf("cli-send-%d", time.Now().UnixNano()), Command: "send", Alias: alias, Text: stdinText, Files: files}, out)
+		if used {
+			return e
+		}
+	}
+	if !*stdin {
+		used, e := sendViaUI(ctx, dir, uiRequest{ID: fmt.Sprintf("cli-send-%d", time.Now().UnixNano()), Command: "send", Alias: alias, Files: files}, out)
+		if used {
+			return e
+		}
+	}
+	var text string
+	var err error
+	if len(files) > 0 {
+		text = ""
+	} else if *stdin {
+		text = stdinText
 		err = validateText(text)
 	} else {
 		text, err = readClipboard(ctx)
+		if err != nil {
+			imagePath, imageErr := readClipboardPNG(ctx)
+			if imageErr == nil {
+				files = []string{imagePath}
+				defer os.Remove(imagePath)
+				err = nil
+			}
+		}
 	}
 	if err != nil {
 		return err
@@ -367,7 +406,7 @@ func sendCommand(ctx context.Context, dir string, args []string, in io.Reader, o
 	if err != nil {
 		return err
 	}
-	session, err := direct.ListenSession(store, direct.SessionConfig{BindAddress: net.JoinHostPort(lan.IP, strconv.Itoa(*listenPort)), EndpointHost: lan.IP, DeviceID: device.ID, SenderName: computerName(), Text: text})
+	session, err := direct.ListenSession(store, direct.SessionConfig{BindAddress: net.JoinHostPort(lan.IP, strconv.Itoa(*listenPort)), EndpointHost: lan.IP, DeviceID: device.ID, SenderName: computerName(), Text: text, Files: files})
 	if err != nil {
 		return err
 	}
@@ -398,7 +437,7 @@ func sendCommand(ctx context.Context, dir string, args []string, in io.Reader, o
 		err = cfg.notify(notifyCtx, relay.Request{DeviceToken: device.DeviceToken, BundleID: device.BundleID, Environment: device.Environment, Notification: relay.Notification{Version: 1, ComputerID: identity.ComputerID, TransferID: session.ID(), Endpoints: []string{session.Endpoint()}}})
 		cancel()
 		if err != nil {
-			fmt.Fprintln(errOut, "Notification could not be sent. Open ClipSend on the device to receive this text.")
+			fmt.Fprintln(errOut, "Notification could not be sent. Open ClipSend on the device to receive.")
 		}
 	} else if errors.Is(configErr, os.ErrNotExist) {
 		fmt.Fprintln(out, "Open ClipSend on your device to receive. Notifications are not configured.")

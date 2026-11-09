@@ -32,13 +32,27 @@ loads remain disabled; HTTP URLs and redirects are rejected by the client.
 
 Invitations expire after five minutes and are single use. Sends expire after two
 minutes; receipt must be explicitly acknowledged by the authenticated receiver.
-No message journal is written. Phone messages live only in memory. The OS clipboard
+No message journal is written. Text messages live only in memory. Attachments use
+private temporary files; receivers enforce declared lengths and SHA-256 before
+acknowledgment, and sender snapshots isolate transfers from source-file changes.
+Desktop inbox quotas include pending reservations. Partial uploads expire, and
+clearing or restarting removes temporary payloads. iOS removes stale temporary
+payloads at startup. Explicit Save/Share is the only export to user storage.
+The OS clipboard
 and any destination into which the user pastes are separate from ClipSend storage.
 
 Computer-side unpair deletes the bearer credential and makes existing sessions
 reject that device. Phone-side forgetting removes the corresponding Keychain entry.
 Protect and revoke notification-service credentials separately; they cannot fetch
 text but can cause notifications for their permitted installation/app scope.
+
+The optional Omarchy service is a local frontend to the Go process. Its private
+Unix socket checks same-UID peers, and its JSON device list omits tokens and
+pairing secrets. Network-supplied labels are displayed as plain text. Receiving
+must be explicitly enabled and never writes the clipboard automatically.
+The iOS Share extension has its own signed application identity and only the
+containing app's pairing Keychain access group. It uses the same certificate pin
+and rejects redirects; discovery does not grant trust.
 
 ## Public release requirements
 

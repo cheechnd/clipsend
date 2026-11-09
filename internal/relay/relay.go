@@ -447,7 +447,7 @@ func apnsPayload(n Notification) []byte {
 		} `json:"aps"`
 		ClipSend Notification `json:"clipsend"`
 	}{ClipSend: n}
-	payload.APS.Alert.Title = "Text ready"
+	payload.APS.Alert.Title = "ClipSend ready"
 	payload.APS.Alert.Body = "Tap to receive in ClipSend."
 	b, _ := json.Marshal(payload)
 	return b

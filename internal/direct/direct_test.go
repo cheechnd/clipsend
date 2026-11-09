@@ -3,8 +3,10 @@ package direct
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -478,4 +480,58 @@ func TestNativeTLSRejectsMissingOrChangedPin(t *testing.T) {
 		t.Fatal("TLS accepted changed certificate pin")
 	}
 	_ = d
+}
+
+func TestAttachmentManifestStreamsStablePrivateSnapshot(t *testing.T) {
+	s, d := testStore(t)
+	src := filepath.Join(t.TempDir(), "payload.txt")
+	original := []byte("attachment bytes survive source replacement")
+	if e := os.WriteFile(src, original, 0600); e != nil {
+		t.Fatal(e)
+	}
+	x, e := ListenSession(s, SessionConfig{DeviceID: d.ID, Text: "", Files: []string{src}, ExternalEndpoint: "https://example.invalid"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer x.Cancel()
+	if e = os.WriteFile(src, []byte("changed"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	server := httptest.NewTLSServer(x.Handler())
+	defer server.Close()
+	client := server.Client()
+	req, _ := http.NewRequest("GET", server.URL+"/v1/transfers/"+x.ID(), nil)
+	req.Header.Set("Authorization", "Bearer "+d.Secret)
+	resp, e := client.Do(req)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var m struct {
+		Text        string       `json:"text"`
+		Attachments []Attachment `json:"attachments"`
+	}
+	e = json.NewDecoder(resp.Body).Decode(&m)
+	resp.Body.Close()
+	if e != nil || m.Text != "" || len(m.Attachments) != 1 {
+		t.Fatalf("bad manifest: %+v %v", m, e)
+	}
+	a := m.Attachments[0]
+	if a.Size != int64(len(original)) {
+		t.Fatalf("declared size %d", a.Size)
+	}
+	req, _ = http.NewRequest("GET", server.URL+"/v1/transfers/"+x.ID()+"/items/"+a.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+d.Secret)
+	resp, e = client.Do(req)
+	if e != nil {
+		t.Fatal(e)
+	}
+	got, e := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if e != nil || !bytes.Equal(got, original) {
+		t.Fatalf("download changed: %q %v", got, e)
+	}
+	sum := sha256.Sum256(got)
+	if hex.EncodeToString(sum[:]) != a.SHA256 {
+		t.Fatal("wrong attachment hash")
+	}
 }

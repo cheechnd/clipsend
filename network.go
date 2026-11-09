@@ -83,10 +83,16 @@ func selectLAN(requested string) (lanAddress, error) {
 func advertise(lan lanAddress, port int, computerID, sessionID string) (*zeroconf.Server, error) {
 	// Discovery identifies a candidate only. The phone must verify its stored TLS pin.
 	instance := "ClipSend-" + sessionID
-	host := "clipsend-" + computerID + ".local."
+	host := "clipsend-" + computerID
 	s, err := zeroconf.RegisterProxy(instance, "_clipsend._tcp", "local.", port, host, []string{lan.IP}, []string{"v=1", "computerID=" + computerID}, []net.Interface{lan.Interface})
 	if err != nil {
 		return nil, fmt.Errorf("cannot announce ClipSend on the local network: %w", err)
 	}
 	return s, nil
+}
+
+func advertiseReceive(lan lanAddress, port int, computerID string) (*zeroconf.Server, error) {
+	instance := "ClipSend-Receive-" + computerID
+	host := "clipsend-" + computerID
+	return zeroconf.RegisterProxy(instance, "_clipsend._tcp", "local.", port, host, []string{lan.IP}, []string{"v=1", "computerID=" + computerID, "receive=1"}, []net.Interface{lan.Interface})
 }
