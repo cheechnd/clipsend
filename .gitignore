@@ -1,0 +1,4 @@
+/clipsend
+*.pem
+*.key
+.env
