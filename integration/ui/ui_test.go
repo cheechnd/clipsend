@@ -548,7 +548,11 @@ func TestUISendWithReceiveEnabledAndNotification(t *testing.T) {
 	h.wait("still-on", "result")
 	for attempt := 0; attempt < 2; attempt++ {
 		text := fmt.Sprintf("standalone CLI transfer %d ✓", attempt)
-		cli := exec.Command(h.cmd.Path, "send", "fixture", "--stdin")
+		argv := []string{"send", "fixture", "--stdin"}
+		if attempt == 1 {
+			argv = []string{"FIXTURE", "--stdin"}
+		}
+		cli := exec.Command(h.cmd.Path, argv...)
 		cli.Env = h.cmd.Env
 		cli.Stdin = strings.NewReader(text)
 		var output bytes.Buffer

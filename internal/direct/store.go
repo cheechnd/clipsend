@@ -422,7 +422,37 @@ func (s *Store) read() (*state, error) {
 		return nil, err
 	}
 	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
-	b, err := readPrivate(s.dataPath, maxStoreBytes)
+	return readStateFile(s.dataPath)
+}
+
+// ReadAliases reads one atomic pairing-store revision without opening or creating
+// a Store, lock file, identity, invitation, or session. Writers replace store.json
+// atomically, so a read-only snapshot does not need to acquire the writer lock.
+func ReadAliases(dir string) ([]string, error) {
+	if err := rejectSymlinkComponents(dir); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0700 {
+		return nil, errors.New("unsafe store directory")
+	}
+	st, err := readStateFile(filepath.Join(dir, "store.json"))
+	if err != nil {
+		return nil, err
+	}
+	aliases := make([]string, 0, len(st.Devices))
+	for _, device := range st.Devices {
+		aliases = append(aliases, device.Alias)
+	}
+	sort.Strings(aliases)
+	return aliases, nil
+}
+
+func readStateFile(path string) (*state, error) {
+	b, err := readPrivate(path, maxStoreBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -435,6 +465,7 @@ func (s *Store) read() (*state, error) {
 	}
 	return &st, nil
 }
+
 func (s *Store) transaction(fn func(*state) error) error {
 	s.mu.Lock()
 	closed := s.closed
@@ -499,7 +530,7 @@ func openPrivate(path string, flags int, mode uint32) (*os.File, error) {
 	return f, nil
 }
 func readPrivate(path string, limit int64) ([]byte, error) {
-	f, err := openPrivate(path, syscall.O_RDONLY, 0600)
+	f, err := openPrivate(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0600)
 	if err != nil {
 		return nil, err
 	}

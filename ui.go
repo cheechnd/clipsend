@@ -130,25 +130,11 @@ func (w *uiWriter) emit(id, typ string, fields map[string]any) {
 	_, _ = w.w.Write(append(b, '\n'))
 	_ = w.w.Flush()
 }
-func uiCommand(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
+func uiCommand(ctx context.Context, host string, port int, in io.Reader, out, errOut io.Writer) error {
 	uiCtx, cancelUI := context.WithCancel(ctx)
 	defer cancelUI()
-	host := ""
-	port := defaultPort
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--host" && i+1 < len(args) {
-			host = args[i+1]
-			i++
-		} else if args[i] == "--port" && i+1 < len(args) {
-			n, e := strconv.Atoi(args[i+1])
-			if e != nil || n < 1 || n > 65535 {
-				return errors.New("invalid port")
-			}
-			port = n
-			i++
-		} else {
-			return errors.New("usage: clipsend ui [--host IP] [--port PORT]")
-		}
+	if port < 1 || port > 65535 {
+		return errors.New("invalid port")
 	}
 	if host != "" {
 		_, e := selectLAN(host)

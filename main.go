@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -28,25 +27,6 @@ var version = "dev"
 
 const defaultPort = 53318
 
-const usage = `ClipSend — send text, images, and files to your paired iPhone or iPad.
-
-Usage:
-  clipsend <alias> [--host IP] [--port PORT] [--stdin] [FILE ...]
-  clipsend send <alias> [--host IP] [--port PORT] [--stdin] [FILE ...]
-  clipsend pair <alias> [--host IP] [--port PORT] [--qr PATH]
-  clipsend devices
-  clipsend rename <alias> <new-alias>
-  clipsend unpair <alias>
-  clipsend relay <private-config.json>
-  clipsend doctor
-  clipsend ui
-  clipsend --version
-
-Scan the pairing QR code in the ClipSend mobile app, then approve the device here.
-Sends expire after two minutes. Text stays in memory; Copy is explicit on the device.
-Both devices must be on the same LAN and this computer must remain awake.
-`
-
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -63,108 +43,67 @@ func nativeConfigDir() (string, error) {
 	return filepath.Join(d, "clipsend-native"), nil
 }
 func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
-	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprint(out, usage)
+	return executeCLI(ctx, args, in, out, errOut)
+}
+
+func deviceCommand(dir, command string, args []string, out io.Writer) error {
+	if _, e := os.Stat(dir); errors.Is(e, os.ErrNotExist) {
+		if command == "devices" || command == "--list" {
+			fmt.Fprintln(out, "No paired devices. Run clipsend pair <alias>.")
+			return nil
+		}
+		return errors.New("no paired devices")
+	}
+	store, e := direct.OpenStore(dir)
+	if e != nil {
+		return e
+	}
+	defer store.Close()
+	_, devices, e := store.Snapshot()
+	if e != nil {
+		return e
+	}
+	switch command {
+	case "devices", "--list":
+		if len(args) != 1 {
+			return errors.New("usage: clipsend devices")
+		}
+		sort.Slice(devices, func(i, j int) bool { return devices[i].Alias < devices[j].Alias })
+		for _, d := range devices {
+			fmt.Fprintf(out, "%s\t%s\n", safeLabel(d.Alias), safeLabel(d.Name))
+		}
+		if len(devices) == 0 {
+			fmt.Fprintln(out, "No paired devices. Run clipsend pair <alias>.")
+		}
 		return nil
-	}
-	if args[0] == "--version" {
-		fmt.Fprintln(out, "clipsend", version)
-		return nil
-	}
-	dir, err := nativeConfigDir()
-	if err != nil {
-		return err
-	}
-	if args[0] == "doctor" {
-		return doctor(dir, out)
-	}
-	if args[0] == "relay" {
+	case "unpair":
 		if len(args) != 2 {
-			return errors.New("usage: clipsend relay <private-config.json>")
+			return errors.New("usage: clipsend unpair <alias>")
 		}
-		c, e := readRelaySettings(args[1])
+		d, e := resolveDevice(devices, args[1])
 		if e != nil {
 			return e
 		}
-		if e = saveRelaySettings(dir, c); e != nil {
+		if e = store.RevokeDevice(d.ID); e != nil {
 			return e
 		}
-		fmt.Fprintln(out, "Notification service configured.")
+		fmt.Fprintf(out, "Unpaired %s. Its access to this computer is revoked.\n", safeLabel(d.Alias))
+		return nil
+	case "rename":
+		if len(args) != 3 {
+			return errors.New("usage: clipsend rename <alias> <new-alias>")
+		}
+		d, e := resolveDevice(devices, args[1])
+		if e != nil {
+			return e
+		}
+		if e = store.RenameDevice(d.ID, args[2]); e != nil {
+			return e
+		}
+		fmt.Fprintf(out, "Renamed %s to %s.\n", safeLabel(d.Alias), safeLabel(args[2]))
 		return nil
 	}
-	command := args[0]
-	if command == "ui" {
-		return uiCommand(ctx, args[1:], in, out, errOut)
-	}
-	if command == "send" {
-		args = args[1:]
-		if len(args) == 0 {
-			return errors.New("usage: clipsend send <alias> [--host IP] [--port PORT] [--stdin]")
-		}
-		return sendCommand(ctx, dir, args, in, out, errOut)
-	}
-	if command == "pair" {
-		return pairCommand(ctx, dir, args[1:], in, out, errOut)
-	}
-	if command == "devices" || command == "--list" || command == "unpair" || command == "rename" {
-		if _, e := os.Stat(dir); errors.Is(e, os.ErrNotExist) {
-			if command == "devices" || command == "--list" {
-				fmt.Fprintln(out, "No paired devices. Run clipsend pair <alias>.")
-				return nil
-			}
-			return errors.New("no paired devices")
-		}
-		store, e := direct.OpenStore(dir)
-		if e != nil {
-			return e
-		}
-		defer store.Close()
-		_, devices, e := store.Snapshot()
-		if e != nil {
-			return e
-		}
-		switch command {
-		case "devices", "--list":
-			if len(args) != 1 {
-				return errors.New("usage: clipsend devices")
-			}
-			sort.Slice(devices, func(i, j int) bool { return devices[i].Alias < devices[j].Alias })
-			for _, d := range devices {
-				fmt.Fprintf(out, "%s\t%s\n", safeLabel(d.Alias), safeLabel(d.Name))
-			}
-			if len(devices) == 0 {
-				fmt.Fprintln(out, "No paired devices. Run clipsend pair <alias>.")
-			}
-			return nil
-		case "unpair":
-			if len(args) != 2 {
-				return errors.New("usage: clipsend unpair <alias>")
-			}
-			d, e := resolveDevice(devices, args[1])
-			if e != nil {
-				return e
-			}
-			if e = store.RevokeDevice(d.ID); e != nil {
-				return e
-			}
-			fmt.Fprintf(out, "Unpaired %s. Its access to this computer is revoked.\n", safeLabel(d.Alias))
-			return nil
-		case "rename":
-			if len(args) != 3 {
-				return errors.New("usage: clipsend rename <alias> <new-alias>")
-			}
-			d, e := resolveDevice(devices, args[1])
-			if e != nil {
-				return e
-			}
-			if e = store.RenameDevice(d.ID, args[2]); e != nil {
-				return e
-			}
-			fmt.Fprintf(out, "Renamed %s to %s.\n", safeLabel(d.Alias), safeLabel(args[2]))
-			return nil
-		}
-	}
-	return sendCommand(ctx, dir, args, in, out, errOut)
+	return nil
 }
 func resolveDevice(devices []direct.Device, alias string) (direct.Device, error) {
 	for _, d := range devices {
@@ -195,28 +134,21 @@ func computerName() string {
 	}
 	return n
 }
-func pairCommand(ctx context.Context, dir string, args []string, in io.Reader, out, errOut io.Writer) error {
-	if len(args) == 0 {
-		return errors.New("usage: clipsend pair <alias> [--host IP] [--port PORT] [--qr PATH]")
-	}
-	alias := args[0]
+
+type pairOptions struct {
+	Host string
+	Port int
+	QR   string
+	Code bool
+}
+
+func pairDevice(ctx context.Context, dir, alias string, options pairOptions, in io.Reader, out, errOut io.Writer) error {
 	if strings.TrimSpace(alias) == "" || len(alias) > 64 || safeLabel(alias) != alias {
 		return errors.New("use a short nonempty device alias without control characters")
 	}
-	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
-	fs.SetOutput(errOut)
-	host := fs.String("host", "", "local IPv4 address")
-	listenPort := fs.Int("port", defaultPort, "local HTTPS port (allow it through your LAN firewall)")
-	qrPath := fs.String("qr", "", "also write a private QR PNG to this path")
-	showCode := fs.Bool("code", false, "also print pairing JSON for manual entry")
-	if e := fs.Parse(args[1:]); e != nil {
-		return e
-	}
+	host, listenPort, qrPath, showCode := &options.Host, &options.Port, &options.QR, &options.Code
 	if *listenPort < 1 || *listenPort > 65535 {
 		return errors.New("port must be between 1 and 65535")
-	}
-	if fs.NArg() != 0 {
-		return errors.New("unexpected pairing arguments")
 	}
 	lan, err := selectLAN(*host)
 	if err != nil {
@@ -315,25 +247,24 @@ func pairCommand(ctx context.Context, dir string, args []string, in io.Reader, o
 		fmt.Fprint(out, "Send a test message now? [y/N] ")
 		answer, answerErr := readAnswer(ctx, in)
 		if answerErr == nil && (strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes")) {
-			return sendCommand(ctx, dir, []string{alias, "--host", lan.IP, "--port", strconv.Itoa(*listenPort), "--stdin"}, strings.NewReader("ClipSend is ready.\nTap Copy to try your first delivery. ✓"), out, errOut)
+			return sendTransfer(ctx, dir, alias, sendOptions{Host: lan.IP, Port: *listenPort, Stdin: true}, nil, strings.NewReader("ClipSend is ready.\nTap Copy to try your first delivery. ✓"), out, errOut)
 		}
 		return nil
 	}
 }
-func sendCommand(ctx context.Context, dir string, args []string, in io.Reader, out, errOut io.Writer) error {
-	alias := args[0]
-	fs := flag.NewFlagSet("send", flag.ContinueOnError)
-	fs.SetOutput(errOut)
-	host := fs.String("host", "", "local IPv4 address")
-	listenPort := fs.Int("port", defaultPort, "local HTTPS port (allow it through your LAN firewall)")
-	stdin := fs.Bool("stdin", false, "read text from standard input instead of clipboard")
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
+
+type sendOptions struct {
+	Host  string
+	Port  int
+	Stdin bool
+}
+
+func sendTransfer(ctx context.Context, dir, alias string, options sendOptions, paths []string, in io.Reader, out, errOut io.Writer) error {
+	host, listenPort, stdin := &options.Host, &options.Port, &options.Stdin
 	if *listenPort < 1 || *listenPort > 65535 {
 		return errors.New("port must be between 1 and 65535")
 	}
-	files := append([]string(nil), fs.Args()...)
+	files := append([]string(nil), paths...)
 	for i, p := range files {
 		absolute, err := filepath.Abs(p)
 		if err != nil {

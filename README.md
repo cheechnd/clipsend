@@ -108,6 +108,83 @@ The CLI never changes firewall rules itself. It listens while pairing, sending,
 or while panel receiving is enabled; no router port forwarding is needed. Push notifications use outbound
 HTTPS to Apple or your configured relay.
 
+## Shell completion
+
+ClipSend uses Cobra for commands, options, help, and generated shell completion:
+
+```sh
+clipsend completion bash
+clipsend completion zsh
+clipsend completion fish
+clipsend completion powershell
+```
+
+Completion reads the local pairing store without creating or updating it. It never
+contacts devices, starts a listener, reads the clipboard, or sends notifications.
+`clipsend ip<Tab>` suggests `iphone` and `ipad` only if those aliases are paired.
+Aliases also complete after `send`, `unpair`, and the first argument of `rename`;
+the new name in `rename` is free text. Matching ignores case. Renames and unpairing
+are reflected immediately. Missing or unreadable pairing data only disables device
+suggestions; command and flag completion remains available.
+
+After the device, both send forms complete file paths, including quoted paths
+containing spaces. Options keep their existing placement: after the alias, before
+the first file. Anything after that first file remains an attachment argument;
+`--` explicitly ends options. `--qr` completes file paths too.
+
+For Bash, install `bash-completion` and generate a saved script:
+
+```sh
+mkdir -p ~/.local/completions
+clipsend completion bash > ~/.local/completions/clipsend.bash
+```
+
+Add this near your other completions in `~/.bashrc`:
+
+```bash
+# ClipSend Completion
+[ -f "$HOME/.local/completions/clipsend.bash" ] && source "$HOME/.local/completions/clipsend.bash"
+```
+
+Remove any source line for the old handwritten script, and remove old copies from
+`~/.local/share/bash-completion/completions/clipsend` or
+`/etc/bash_completion.d/clipsend` if you installed it there. Replace its registration
+once in an existing shell:
+
+```bash
+complete -r clipsend 2>/dev/null || true
+unset -f _clipsend_complete
+source ~/.bashrc
+```
+
+New shells load the saved script directly. Paired aliases are queried at completion
+time, so pairing or renaming devices does not require regenerating the script.
+After upgrading the CLI, regenerate the saved script using the command above.
+The tracked `completions/clipsend.bash` is also generated; refresh it after CLI
+changes with `go run . completion bash > completions/clipsend.bash`.
+
+For other shells:
+
+```sh
+# Zsh: place _clipsend in a directory on $fpath, then enable compinit in ~/.zshrc.
+mkdir -p ~/.zsh/completions
+clipsend completion zsh > ~/.zsh/completions/_clipsend
+# Add to ~/.zshrc: fpath=(~/.zsh/completions $fpath)
+#                 autoload -Uz compinit && compinit
+
+# Fish:
+mkdir -p ~/.config/fish/completions
+clipsend completion fish > ~/.config/fish/completions/clipsend.fish
+```
+
+In PowerShell, add `clipsend completion powershell | Out-String | Invoke-Expression`
+to `$PROFILE`. All scripts come from Cobra's built-in generators.
+
+Use `clipsend --help` or `clipsend send --help` for command help. For compatibility,
+the older alias-first help forms (`clipsend ipad --help`, `clipsend send ipad --help`,
+and `clipsend pair ipad --help`) still print help and exit with status 1. Normal
+command help and successful operations exit 0; errors exit 1.
+
 ## Notifications
 
 Notifications are optional: foreground delivery works without them. Configure
@@ -178,12 +255,14 @@ and [security boundaries](docs/SECURITY.md).
 ```sh
 go test -race -timeout 120s ./...
 go vet ./...
+# Go tests also exercise generated Bash via real readline when Python 3 and
+# bash-completion are available; those are development-only test dependencies.
 bash native/ios/scripts/check.sh
 bash scripts/build-release.sh v0.1.0
 ```
 
 The release script builds Linux amd64/arm64 executables and checksums in ignored
-`dist/`. Bash completion is in `completions/clipsend.bash`. Native builds use the
+`dist/`. Generated Bash completion is in `completions/clipsend.bash`. Native builds use the
 existing Swift/xtool workflow; private signing materials never belong in the repo.
 Use the documented [device build](native/ios/README.md#install-on-a-device) so both
 the app and Share extension receive the correct signing identities.

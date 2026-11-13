@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -121,7 +122,7 @@ func TestNativeCLIEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	var output bytes.Buffer
-	if err := run(ctx, []string{"send", "testpad", "--host", lan.IP, "--stdin"}, strings.NewReader(text), &output, &output); err != nil {
+	if err := run(ctx, []string{"send", "testpad", "--host", lan.IP, "--port", nativeFixturePort(t, lan.IP), "--stdin"}, strings.NewReader(text), &output, &output); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -164,8 +165,9 @@ func TestNativePairingQRCode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	finished := make(chan error, 1)
+	port := nativeFixturePort(t, lan.IP)
 	go func() {
-		finished <- run(ctx, []string{"pair", "testpad", "--host", lan.IP, "--qr", qrPath}, strings.NewReader("yes\n"), io.Discard, io.Discard)
+		finished <- run(ctx, []string{"pair", "testpad", "--host", lan.IP, "--port", port, "--qr", qrPath}, strings.NewReader("yes\n"), io.Discard, io.Discard)
 	}()
 	var raw []byte
 	for ctx.Err() == nil {
@@ -233,4 +235,19 @@ func TestNativePairingQRCode(t *testing.T) {
 	if _, err := os.Stat(qrPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("pairing QR was not removed")
 	}
+}
+
+// Keep opt-in LAN fixtures independent of the user's running desktop listener.
+func nativeFixturePort(t *testing.T, host string) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	listener.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
 }
