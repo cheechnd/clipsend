@@ -14,6 +14,8 @@ public distribution and hosted customer enrollment are not yet available; see [r
 ```sh
 clipsend iphone
 clipsend ipad
+clipsend iphone --text "https://example.com"
+clipsend send ipad --text "Meet downstairs"
 printf 'A link or some text' | clipsend send ipad --stdin
 clipsend ipad "$PWD/photo.png" "$PWD/document.pdf"
 ```
@@ -22,7 +24,12 @@ The computer and device must be on the same local IPv4 network. Keep the compute
 awake and the command running until the device confirms receipt. Text is UTF-8,
 up to 64,000 bytes. A send can contain up to 16 files, with a 128 MiB limit per
 file and 256 MiB per batch. Relative file paths resolve from your current directory. With no file
-arguments, the command reads clipboard text or a PNG image on demand.
+arguments or explicit text input, the command reads clipboard text or a PNG image
+on demand. `--text` sends its argument exactly as supplied, including whitespace,
+Unicode, and newlines, without reading or changing the clipboard. It uses the same
+64,000-byte UTF-8 text limit and validation as other text sends. It cannot be
+combined with `--stdin` or file attachments; `--text ""` is invalid and never falls
+back to the clipboard.
 Each send expires after two minutes. The command reports
 **Received** after the app validates and acknowledges the complete delivery; it does not claim that you
 have copied or pasted it. Cancellation or expiry means receipt was not confirmed.

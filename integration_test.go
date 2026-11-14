@@ -30,6 +30,7 @@ func TestNativeCLIEndToEnd(t *testing.T) {
 	if os.Getenv("CLIPSEND_NETWORK_TEST") != "1" {
 		t.Skip("set CLIPSEND_NETWORK_TEST=1 to exercise real LAN listener + CLI + notification handoff")
 	}
+	guardTextClipboard(t)
 	lan, err := selectLAN("")
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +64,7 @@ func TestNativeCLIEndToEnd(t *testing.T) {
 	}}}
 	defer transport.CloseIdleConnections()
 	receiver := &http.Client{Transport: transport, Timeout: 5 * time.Second}
-	const text = "ClipSend native integration test\nUnicode: café 世界 🔒"
+	const text = " \tClipSend native integration test\nUnicode: café 世界 🔒\n  "
 	received := make(chan error, 1)
 	notification := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+strings.Repeat("r", 43) {
@@ -121,23 +122,29 @@ func TestNativeCLIEndToEnd(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	var output bytes.Buffer
-	if err := run(ctx, []string{"send", "testpad", "--host", lan.IP, "--port", nativeFixturePort(t, lan.IP), "--stdin"}, strings.NewReader(text), &output, &output); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-received:
-		if err != nil {
+	for _, args := range [][]string{
+		{"send", "testpad", "--host", lan.IP, "--port", nativeFixturePort(t, lan.IP), "--stdin"},
+		{"testpad", "--host", lan.IP, "--port", nativeFixturePort(t, lan.IP), "--text", text},
+		{"send", "testpad", "--host", lan.IP, "--port", nativeFixturePort(t, lan.IP), "--text", text},
+	} {
+		var output bytes.Buffer
+		if err := run(ctx, args, strings.NewReader(text), &output, &output); err != nil {
 			t.Fatal(err)
 		}
-	case <-ctx.Done():
-		t.Fatal("receiver did not get acknowledgment response")
-	}
-	if !strings.Contains(output.String(), "Received by testpad.") {
-		t.Fatal("missing confirmed receipt")
-	}
-	if strings.Contains(output.String(), text) {
-		t.Fatal("clipboard text leaked to terminal")
+		select {
+		case err := <-received:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-ctx.Done():
+			t.Fatal("receiver did not get acknowledgment response")
+		}
+		if !strings.Contains(output.String(), "Received by testpad.") {
+			t.Fatal("missing confirmed receipt")
+		}
+		if strings.Contains(output.String(), text) {
+			t.Fatal("clipboard text leaked to terminal")
+		}
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "store.json"))
 	if err != nil {

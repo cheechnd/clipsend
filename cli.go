@@ -59,6 +59,7 @@ func newRootCommand() *cobra.Command {
 		if len(args) == 0 {
 			return cmd.Help()
 		}
+		quick.TextSet = cmd.Flags().Changed("text")
 		return withConfig(func(dir string) error {
 			return sendTransfer(cmd.Context(), dir, canonicalDeviceAlias(dir, args[0]), quick, args[1:], cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 		})
@@ -67,10 +68,11 @@ func newRootCommand() *cobra.Command {
 
 	var sendOpts sendOptions
 	send := &cobra.Command{
-		Use: "send <alias> [flags] [files...]", Short: "Send the clipboard, stdin, or files to a paired device",
-		Args:              usageArgs(1, -1, "clipsend send <alias> [--host IP] [--port PORT] [--stdin]"),
+		Use: "send <alias> [flags] [files...]", Short: "Send text, the clipboard, stdin, or files to a paired device",
+		Args:              usageArgs(1, -1, "clipsend send <alias> [--host IP] [--port PORT] [--stdin | --text TEXT]"),
 		ValidArgsFunction: completeSend,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			sendOpts.TextSet = cmd.Flags().Changed("text")
 			return withConfig(func(dir string) error {
 				return sendTransfer(cmd.Context(), dir, canonicalDeviceAlias(dir, args[0]), sendOpts, args[1:], cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 			})
@@ -201,6 +203,9 @@ func addNetworkFlags(flags *pflag.FlagSet, host *string, port *int) {
 func addSendFlags(cmd *cobra.Command, options *sendOptions) {
 	addNetworkFlags(cmd.Flags(), &options.Host, &options.Port)
 	cmd.Flags().BoolVar(&options.Stdin, "stdin", false, "read text from standard input instead of clipboard")
+	cmd.Flags().StringVar(&options.Text, "text", "", "send this text instead of reading the clipboard")
+	cmd.MarkFlagsMutuallyExclusive("text", "stdin")
+	_ = cmd.RegisterFlagCompletionFunc("text", cobra.NoFileCompletions)
 	noNetworkFlagCompletions(cmd)
 }
 func noNetworkFlagCompletions(cmd *cobra.Command) {

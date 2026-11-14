@@ -254,15 +254,28 @@ func pairDevice(ctx context.Context, dir, alias string, options pairOptions, in 
 }
 
 type sendOptions struct {
-	Host  string
-	Port  int
-	Stdin bool
+	Host    string
+	Port    int
+	Stdin   bool
+	Text    string
+	TextSet bool
 }
 
 func sendTransfer(ctx context.Context, dir, alias string, options sendOptions, paths []string, in io.Reader, out, errOut io.Writer) error {
 	host, listenPort, stdin := &options.Host, &options.Port, &options.Stdin
 	if *listenPort < 1 || *listenPort > 65535 {
 		return errors.New("port must be between 1 and 65535")
+	}
+	if options.TextSet {
+		if options.Stdin {
+			return errors.New("--text cannot be combined with --stdin")
+		}
+		if len(paths) > 0 {
+			return errors.New("--text cannot be combined with attachment paths")
+		}
+		if err := validateText(options.Text); err != nil {
+			return err
+		}
 	}
 	files := append([]string(nil), paths...)
 	for i, p := range files {
@@ -275,7 +288,7 @@ func sendTransfer(ctx context.Context, dir, alias string, options sendOptions, p
 	if *stdin && len(files) > 0 {
 		return errors.New("--stdin cannot be combined with attachment paths")
 	}
-	var stdinText string
+	providedText := options.Text
 	if *stdin {
 		b, e := io.ReadAll(io.LimitReader(in, 64001))
 		if e != nil {
@@ -284,13 +297,15 @@ func sendTransfer(ctx context.Context, dir, alias string, options sendOptions, p
 		if len(b) > 64000 {
 			return errors.New("stdin exceeds 64,000 bytes")
 		}
-		stdinText = string(b)
-		used, e := sendViaUI(ctx, dir, uiRequest{ID: fmt.Sprintf("cli-send-%d", time.Now().UnixNano()), Command: "send", Alias: alias, Text: stdinText, Files: files}, out)
+		providedText = string(b)
+	}
+	if *stdin || options.TextSet {
+		used, e := sendViaUI(ctx, dir, uiRequest{ID: fmt.Sprintf("cli-send-%d", time.Now().UnixNano()), Command: "send", Alias: alias, Text: providedText, Files: files}, out)
 		if used {
 			return e
 		}
 	}
-	if !*stdin {
+	if !*stdin && !options.TextSet {
 		used, e := sendViaUI(ctx, dir, uiRequest{ID: fmt.Sprintf("cli-send-%d", time.Now().UnixNano()), Command: "send", Alias: alias, Files: files}, out)
 		if used {
 			return e
@@ -300,8 +315,8 @@ func sendTransfer(ctx context.Context, dir, alias string, options sendOptions, p
 	var err error
 	if len(files) > 0 {
 		text = ""
-	} else if *stdin {
-		text = stdinText
+	} else if *stdin || options.TextSet {
+		text = providedText
 		err = validateText(text)
 	} else {
 		text, err = readClipboard(ctx)
