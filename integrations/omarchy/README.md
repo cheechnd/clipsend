@@ -31,7 +31,7 @@ omarchy-shell shell summon clipsend.omarchy '{}'
 Stopping the shell temporarily stops receiving, cancels active transfers and
 pairing invitations, and clears the ephemeral inbox and retry state. Save any
 inbox files you want to keep first. Existing device pairings and saved files
-remain untouched. Turn receiving back on in Inbox after restart. Removing or
+remain untouched. The receiving toggle is remembered and restored after restart. Removing or
 disabling this plugin leaves the standalone CLI usable.
 
 The panel opens on **Send**, with a compact ClipSend header and receiving state.
@@ -62,7 +62,9 @@ Omarchy creates one `Service.qml` per shell; all per-monitor `Panel.qml`
 instances use that service's single `clipsend ui` process, version 1 JSONL
 stream, transfer state, and inbox. Closing a panel only hides its
 `KeyboardPanel`. The service is kept loaded during shell hot reload, and
-receiving starts off until enabled by the switch. Disabling/unloading the
+receiving starts off on first use; the switch is saved with the pairing store and
+restored when the backend starts. A failed restore reports the listener error without
+forgetting the saved choice. Disabling/unloading the
 plugin stops its child process; the backend's EOF cleanup turns off listeners
 and removes ephemeral inbox data.
 

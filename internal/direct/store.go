@@ -55,9 +55,10 @@ type Device struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 type state struct {
-	Version  int               `json:"version"`
-	Identity Identity          `json:"identity"`
-	Devices  map[string]Device `json:"devices"`
+	Version        int               `json:"version"`
+	Identity       Identity          `json:"identity"`
+	Devices        map[string]Device `json:"devices"`
+	ReceiveEnabled bool              `json:"receiveEnabled,omitempty"`
 }
 type Invitation struct {
 	Value     string    `json:"invitation"`
@@ -290,6 +291,20 @@ func (s *Store) FindDevice(alias string) (Device, bool) {
 		}
 	}
 	return Device{}, false
+}
+
+// ReceiveEnabled is the user's desktop receiving preference, separate from the
+// current listener state. Opening a CLI or completion never starts a listener.
+func (s *Store) ReceiveEnabled() (bool, error) {
+	st, err := s.read()
+	if err != nil {
+		return false, err
+	}
+	return st.ReceiveEnabled, nil
+}
+
+func (s *Store) SetReceiveEnabled(enabled bool) error {
+	return s.transaction(func(st *state) error { st.ReceiveEnabled = enabled; return nil })
 }
 
 // RenameDevice atomically changes a paired device's local alias.

@@ -285,6 +285,22 @@ func uiCommand(ctx context.Context, host string, port int, in io.Reader, out, er
 			_ = activeInbox.Close()
 		}
 	}()
+	// Restore only the user's explicit choice; ordinary CLI sends remain transient.
+	if enabled, err := store.ReceiveEnabled(); err != nil {
+		writer.emit("startup-receive", "error", map[string]any{"code": "settings_failed", "message": "Could not read receiving preference. Turn receiving on to retry."})
+	} else if enabled {
+		stateMu.Lock()
+		ln, sv, ann, endpoint, err := startUIReceiver(host, port, dir, store, &inbox, transfers, writer)
+		if err == nil {
+			listener, httpServer, announcement = ln, sv, ann
+		}
+		stateMu.Unlock()
+		if err != nil {
+			writer.emit("startup-receive", "error", map[string]any{"code": "listen_failed", "message": "Could not restore receiving: " + err.Error()})
+		} else {
+			writer.emit("startup-receive", "status", map[string]any{"state": "receive_restored", "endpoint": endpoint})
+		}
+	}
 	for {
 		select {
 		case <-uiCtx.Done():
@@ -391,6 +407,11 @@ func uiCommand(ctx context.Context, host string, port int, in io.Reader, out, er
 				case "receive":
 					stateMu.Lock()
 					if !q.Enabled {
+						if e := store.SetReceiveEnabled(false); e != nil {
+							stateMu.Unlock()
+							fail("settings_failed", "Could not save receiving preference; receiving is unchanged.")
+							return
+						}
 						if httpServer != nil {
 							_ = httpServer.Close()
 							httpServer = nil
@@ -405,6 +426,11 @@ func uiCommand(ctx context.Context, host string, port int, in io.Reader, out, er
 						return
 					}
 					if httpServer != nil {
+						if e := store.SetReceiveEnabled(true); e != nil {
+							stateMu.Unlock()
+							fail("settings_failed", "Could not save receiving preference.")
+							return
+						}
 						endpoint := "https://" + listener.Addr().String()
 						stateMu.Unlock()
 						result(map[string]any{"enabled": true, "endpoint": endpoint})
@@ -414,6 +440,15 @@ func uiCommand(ctx context.Context, host string, port int, in io.Reader, out, er
 					if e != nil {
 						stateMu.Unlock()
 						fail("listen_failed", e.Error())
+						return
+					}
+					if e := store.SetReceiveEnabled(true); e != nil {
+						_ = sv.Close()
+						if ann != nil {
+							ann.Shutdown()
+						}
+						stateMu.Unlock()
+						fail("settings_failed", "Could not save receiving preference; receiving remains off.")
 						return
 					}
 					listener, httpServer, announcement = ln, sv, ann

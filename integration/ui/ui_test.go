@@ -30,14 +30,15 @@ import (
 
 type event map[string]any
 type harness struct {
-	config  string
-	t       *testing.T
-	cmd     *exec.Cmd
-	in      io.WriteCloser
-	events  chan event
-	backlog []event
-	logs    bytes.Buffer
-	mu      sync.Mutex
+	config   string
+	t        *testing.T
+	cmd      *exec.Cmd
+	in       io.WriteCloser
+	events   chan event
+	backlog  []event
+	logs     bytes.Buffer
+	stopOnce sync.Once
+	mu       sync.Mutex
 }
 
 func (h *harness) send(id, command string, fields event) {
@@ -138,7 +139,13 @@ func start(t *testing.T) (*harness, string) {
 		t.Fatal(err)
 	}
 	h.cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+dir, "XDG_CACHE_HOME="+dir, "XDG_RUNTIME_DIR="+dir, "TMPDIR="+dir, "CLIPSEND_TEST_OPEN="+filepath.Join(dir, "opened-fixture"), "CLIPSEND_TEST_CLIPBOARD="+filepath.Join(dir, "clipboard-fixture"), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	launchUIHarness(t, h)
+	return h, "https://" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func launchUIHarness(t *testing.T, h *harness) {
 	h.cmd.Stderr = &h.logs
+	var err error
 	h.in, err = h.cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +168,10 @@ func start(t *testing.T) (*harness, string) {
 			}
 		}
 	}()
-	t.Cleanup(func() {
+	t.Cleanup(h.stop)
+}
+func (h *harness) stop() {
+	h.stopOnce.Do(func() {
 		h.in.Close()
 		done := make(chan error, 1)
 		go func() { done <- h.cmd.Wait() }()
@@ -172,8 +182,8 @@ func start(t *testing.T) (*harness, string) {
 			<-done
 		}
 	})
-	return h, "https://" + net.JoinHostPort(host, strconv.Itoa(port))
 }
+
 func request(t *testing.T, c *http.Client, method, url, token string, body []byte) (int, []byte) {
 	t.Helper()
 	r, err := http.NewRequest(method, url, bytes.NewReader(body))
@@ -640,4 +650,46 @@ func TestUISendWithReceiveEnabledAndNotification(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
+}
+
+func TestUIReceivingSurvivesRestart(t *testing.T) {
+	h, endpoint := start(t)
+	client, secret := pair(t, h)
+	h.send("on", "receive", event{"enabled": true})
+	h.wait("on", "result")
+	h.stop()
+	restart := func(prior *harness) *harness {
+		next := &harness{t: t, config: prior.config, events: make(chan event, 100)}
+		next.cmd = exec.Command(prior.cmd.Path, prior.cmd.Args[1:]...)
+		next.cmd.Env = prior.cmd.Env
+		launchUIHarness(t, next)
+		return next
+	}
+	h = restart(h)
+	status := h.wait("startup-receive", "status")
+	if status["state"] != "receive_restored" || status["endpoint"] != endpoint {
+		t.Fatalf("not restored: %v", status)
+	}
+	// The restored listener accepts authenticated receipt without another toggle.
+	code, _ := request(t, client, "POST", endpoint+"/v1/incoming", secret, marshal(t, event{"version": 1, "text": "after restart"}))
+	if code != 201 {
+		t.Fatalf("restored receiver HTTP %d", code)
+	}
+	h.send("off", "receive", event{"enabled": false})
+	h.wait("off", "result")
+	h.stop()
+	h = restart(h)
+	h.send("devices", "devices", event{})
+	h.wait("devices", "result")
+	select {
+	case e := <-h.events:
+		if e["state"] == "receive_restored" {
+			t.Fatal("disabled receiving restored")
+		}
+	default:
+	}
+	if conn, err := net.DialTimeout("tcp", strings.TrimPrefix(endpoint, "https://"), 200*time.Millisecond); err == nil {
+		conn.Close()
+		t.Fatal("disabled receiving listener restarted")
+	}
 }

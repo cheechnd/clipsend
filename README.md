@@ -52,7 +52,8 @@ explicit retry; retrying the clipboard reads its current contents.
 Turn on **Receive on this computer** in Inbox to send back from iOS. In ClipSend,
 expand **Send to a computer**, or choose **ClipSend** in another app's Share menu.
 The Share extension sends directly to a paired, receiving computer. Receiving
-starts off and stays on when the panel closes, until turned off or the shell exits.
+starts off on first use. Its toggle is remembered across ClipSend and shell restarts;
+closing the panel leaves receiving on. Turning it off keeps it off after restarts.
 New items never overwrite the clipboard automatically. Copy text or PNG/JPEG
 images, save an attachment, or clear a delivery explicitly. Saving refuses to
 overwrite an existing file.
